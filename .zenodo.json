@@ -1,0 +1,30 @@
+{
+  "upload_type": "software",
+  "title": "Retention Layer: simulation code and results",
+  "description": "Mechanism-level simulation of a Retention Layer whose memory lifecycle is governed by social learning strategies. The archive contains the simulation, the figure script, the raw results and the figures reported in the revised version of the paper Attention Is All You Need Until You Need Retention (arXiv:2501.09166).",
+  "creators": [
+    {
+      "name": "Yaslioglu, M. Murat",
+      "affiliation": "Istanbul University, School of Business",
+      "orcid": "0000-0003-2464-5439"
+    }
+  ],
+  "access_right": "open",
+  "license": "gpl-3.0-only",
+  "keywords": [
+    "Transformer memory",
+    "retention layer",
+    "social learning strategies",
+    "memory consolidation",
+    "memory poisoning",
+    "continual learning"
+  ],
+  "related_identifiers": [
+    {
+      "identifier": "https://doi.org/10.48550/arXiv.2501.09166",
+      "relation": "isSupplementTo",
+      "resource_type": "publication-preprint"
+    }
+  ],
+  "language": "eng"
+}
