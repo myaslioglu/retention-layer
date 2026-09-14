@@ -1,0 +1,35 @@
+cff-version: 1.2.0
+message: "If you use this code, please cite the paper given under preferred-citation."
+type: software
+title: "Retention Layer: simulation code and results"
+abstract: >-
+  Mechanism-level simulation of a Retention Layer whose memory lifecycle is
+  governed by social learning strategies, with the raw results and figures
+  reported in the revised version of "Attention Is All You Need Until You
+  Need Retention".
+authors:
+  - family-names: Yaslioglu
+    given-names: M. Murat
+    affiliation: "Istanbul University, School of Business"
+    orcid: "https://orcid.org/0000-0003-2464-5439"
+repository-code: "https://github.com/myaslioglu/retention-layer"
+license: GPL-3.0-only
+keywords:
+  - Transformer memory
+  - retention layer
+  - social learning strategies
+  - memory consolidation
+  - memory poisoning
+  - continual learning
+preferred-citation:
+  type: article
+  title: "Attention is All You Need Until You Need Retention"
+  authors:
+    - family-names: Yaslioglu
+      given-names: M. Murat
+      orcid: "https://orcid.org/0000-0003-2464-5439"
+  journal: "arXiv preprint arXiv:2501.09166"
+  year: 2025
+  month: 1
+  doi: "10.48550/arXiv.2501.09166"
+  url: "https://arxiv.org/abs/2501.09166"

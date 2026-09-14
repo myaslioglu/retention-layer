@@ -1,0 +1,13 @@
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.DS_Store
+
+# Headless Chrome profile created by make_figures.py
+.chrome-profile/
+
+# Outputs of local runs; the reported results live in results/
+/results.json
+/results_quick.json
+/figures_check/
