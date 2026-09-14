@@ -1,5 +1,7 @@
 # Retention Layer
 
+[![DOI](https://img.shields.io/badge/DOI-10.5281%2Fzenodo.22758216-blue)](https://doi.org/10.5281/zenodo.22758216)
+
 Simulation code, raw results and figures for the paper *Attention Is All You Need Until You Need Retention* by M. Murat Yaslioglu.
 
 Version 1 of the paper, posted in January 2025, is [arXiv:2501.09166](https://arxiv.org/abs/2501.09166). It proposed a Retention Layer: a persistent memory that a Transformer block reads with attention and writes during use. This repository accompanies the revised version, subtitled *Governing Persistent Transformer Memory with Social Learning Strategies*, which is being prepared as arXiv version 2. Section, table and figure numbers below refer to that revision.
@@ -79,7 +81,7 @@ An earlier version of the lifecycle had no confirmations, no tallies and no rela
 
 ## Citation
 
-Until version 2 is posted, please cite the arXiv preprint:
+Please cite the paper. Until version 2 is posted, cite the arXiv preprint:
 
 ```bibtex
 @misc{yaslioglu2025attention,
@@ -92,7 +94,20 @@ Until version 2 is posted, please cite the arXiv preprint:
 }
 ```
 
-`CITATION.cff` gives the same reference through the "Cite this repository" button on GitHub.
+To cite the code, use its Zenodo archive. The concept DOI [10.5281/zenodo.22758216](https://doi.org/10.5281/zenodo.22758216) always resolves to the latest version. Version 1.0.0, which produced the results reported in the paper, has its own DOI, [10.5281/zenodo.22758217](https://doi.org/10.5281/zenodo.22758217).
+
+```bibtex
+@software{yaslioglu2026retentioncode,
+  author    = {Yaslioglu, M. Murat},
+  title     = {Retention Layer: simulation code and results},
+  version   = {v1.0.0},
+  year      = {2026},
+  publisher = {Zenodo},
+  doi       = {10.5281/zenodo.22758217}
+}
+```
+
+`CITATION.cff` gives the paper reference through the "Cite this repository" button on GitHub.
 
 ## License
 
