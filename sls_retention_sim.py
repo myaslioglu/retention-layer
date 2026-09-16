@@ -500,6 +500,20 @@ def run_policy(world, pol):
 # ---------------------------------------------------------------------------
 # Experiment definitions
 # ---------------------------------------------------------------------------
+def obs_per_window(env):
+    """Observations about one situation that fall inside a recency window.
+
+    Independent of T: (1 - p_interact) * WINDOW / n_sit. At the published settings this is
+    5.97, while quorum_study checks Proposition 2 at N = 20, so the simulation never enters
+    the regime the proposition describes. DENSE_ENV rescales n_sit to close that gap.
+    """
+    return (1.0 - env.p_interact) * WINDOW / env.n_sit
+
+
+DENSE_ENV = dict(n_sit=60, n_targets=6)      # obs_per_window = 20.0, the density quorum_study assumes
+DENSE_SCALE = 20.0 / 6.0                     # so a quorum k compares to k * DENSE_SCALE at that density
+
+
 def main_policies():
     return [
         Policy("v1_ungated", gate="none", use_buffer=False, quorum=0.0, use_cred=False, use_payoff=False,
@@ -526,6 +540,8 @@ def main_policies():
         Policy("sls_quorum_hist2", quorum_min_history=2),
         Policy("sls_v3", gate_first=True, bounded_surprise=True, confirm_gate=True, quorum_min_history=2),
         Policy("sls_history", confirm_min_history=2, quorum_min_history=2),
+        Policy("sls_cap60", cap=60),                          # store fills, so eviction is exercised
+        Policy("sls_cap60_fifo", cap=60, eviction="fifo"),    # ... and the eviction rule matters
     ]
 
 
@@ -743,10 +759,16 @@ def main():
     for scen, kw in SCENARIOS.items():
         for s in range(a.seeds):
             jobs.append(("main", scen, dict(base_env, **kw), 1000 + s, main_policies()))
-    quorum_pols = [replace(Policy("sls_full"), name=f"sls_q{kq:g}", quorum=float(kq)) for kq in [0, 1, 2, 3, 4, 6]]
+    QS = [0, 1, 2, 3, 4, 6]
+    quorum_pols = [replace(Policy("sls_full"), name=f"sls_q{kq:g}", quorum=float(kq)) for kq in QS]
+    # Same relative quorum, 3.33x the observation density: does the separation the propositions
+    # predict appear once the simulation reaches the regime they assume?
+    dense_pols = [replace(Policy("sls_full"), name=f"sls_q{kq:g}", quorum=float(kq) * DENSE_SCALE) for kq in QS]
+    dense_env = dict(base_env, **DENSE_ENV)
     for scen in ["clean", "sybil_forged", "farmed_forged"]:
         for s in range(a.seeds):
             jobs.append(("quorum", scen, dict(base_env, **SCENARIOS[scen]), 1000 + s, quorum_pols))
+            jobs.append(("quorum_dense", scen, dict(dense_env, **SCENARIOS[scen]), 1000 + s, dense_pols))
     rho_pols = [p for p in main_policies() if p.name in ("v1_ungated", "trust_gated", "sls_full", "sls_adaptive_quorum")]
     for scen in ["sybil_forged", "farmed_forged"]:
         for rho in [0.1, 0.3, 0.5, 0.7]:
@@ -778,6 +800,9 @@ def main():
     out = dict(
         config=dict(env=asdict(Env(**base_env)),
                     envs={scen: asdict(Env(**dict(base_env, **kw))) for scen, kw in SCENARIOS.items()},
+                    obs_per_window=obs_per_window(Env(**base_env)),
+                    obs_per_window_dense=obs_per_window(Env(**dict(base_env, **DENSE_ENV))),
+                    dense_env=DENSE_ENV, dense_scale=DENSE_SCALE,
                     seeds=a.seeds, elapsed_sec=elapsed,
                     constants=dict(TAU=TAU, NULL_LOGIT=NULL_LOGIT, BETA=BETA, LAMBDA=LAMBDA, DELTA_K=DELTA_K,
                                    ETA=ETA, DECAY=DECAY, S0=S0, TH_S=TH_S, TH_P=TH_P, TH_C=TH_C,
@@ -802,11 +827,13 @@ def main():
             print(f"{p:24s} " + " ".join(f"{sm[k]['final'][0]:6.3f}" for k, _ in cols)
                   + f" {sm['acc_unknown']['mean_over_time'][0]:6.3f} {sm['online_acc'][0]:6.3f}"
                   + f" {sm['store_insert'][0]:5.0f} {sm['promoted'][0]:5.0f} {sm['blocked_by_rival'][0]:5.0f}")
-    for scen, d2 in summary["quorum"].items():
-        print(f"\n== quorum sweep / {scen}")
-        for p, sm in d2.items():
-            print(f"{p:10s} acc_all={sm['acc_all']['final'][0]:.3f} unkAUC={sm['acc_unknown']['mean_over_time'][0]:.3f} "
-                  f"drift={sm['acc_drifted']['final'][0]:.3f} ASR={sm['asr']['final'][0]:.3f}")
+    for exp in ["quorum", "quorum_dense"]:
+        for scen, d2 in summary[exp].items():
+            print(f"\n== {exp} sweep / {scen}  ({obs_per_window(Env(**(dict(base_env, **DENSE_ENV) if exp.endswith('dense') else base_env))):.1f} obs per situation per window)")
+            for p, sm in d2.items():
+                print(f"{p:10s} acc_all={sm['acc_all']['final'][0]:.3f} "
+                      f"unkAUC={sm['acc_unknown']['mean_over_time'][0]:.3f} "
+                      f"drift={sm['acc_drifted']['final'][0]:.3f} ASR={sm['asr']['final'][0]:.3f}")
     print("\n== rho sweep: (acc_all, ASR) final")
     for scen, d2 in summary["rho"].items():
         print(scen, {p: (round(sm["acc_all"]["final"][0], 3), round(sm["asr"]["final"][0], 3)) for p, sm in d2.items()})
