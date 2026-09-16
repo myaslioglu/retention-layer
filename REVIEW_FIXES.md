@@ -248,3 +248,47 @@ Two further caveats found along the way, neither in the original list:
     python3 make_figures.py runs/after.json figures
 
 All four published figures regenerate byte-identical from this branch.
+
+## Follow-ups
+
+### Figure 5: the density result now has a picture
+
+`fig5_density.svg` puts the two quorum sweeps side by side. Panel (a): attack
+success is flat in the quorum at 5.97 observations per situation per window and
+falls monotonically at 20.0. Panel (b): up to k = 3 both densities pay almost the
+same cost on drifted situations, so in the regime the propositions describe the
+reduction is close to free. PNG export needs Chrome, which was not available
+here, so it ships as SVG only.
+
+### The headline quorum moves to k = 1
+
+The sweep already showed k = 1 dominating k = 2; the full table confirms it.
+
+| Policy | S0 acc | S0 drifted | S2 ASR | S3 ASR |
+|:--|--:|--:|--:|--:|
+| SLS, fixed quorum, k = 2 | 0.996 | 0.958 | 0.059 | 0.066 |
+| SLS, fixed quorum, **k = 1** | **0.999** | **0.989** | 0.059 | **0.042** |
+
+Better on three columns, identical on the fourth. `--headline-quorum` now
+defaults to 1 and applies to every policy that does not name its own quorum; the
+three baselines do not use a quorum and are unchanged, which is itself a check
+that the knob only reaches what it should. `results/results.json` still
+reproduces exactly with `--headline-quorum 2`.
+
+### Freezing credibility at record time: no measurable effect
+
+`support()` reads credibility when the support is read, not when it was recorded,
+so a farm that earns reputation with forged outcomes retroactively raises the
+weight of its earlier injections. `cred_frozen` stores credibility with each
+support record instead.
+
+Paired against `sls_full`: `asr +0.0025 +- 0.0041` under S2, `+0.0000 +- 0.0019`
+under S3, `acc_all -0.0003 +- 0.0005`. Nothing significant. The farm starts from
+a prior credibility of about 0.767, so there is little left to gain
+retroactively, and the recency window bounds how far back it could reach.
+
+This is the third code smell in this review that measurement clears: the ungated
+confirmation path, the retroactive credibility read and the unbounded gate term
+are all real, and none of them carries the attack at these settings. Worth saying
+in the paper — the lifecycle is more robust than a reading of the code suggests.
+The flags stay so the claim can be re-checked when parameters change.
