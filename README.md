@@ -30,7 +30,8 @@ The paper proves that raising the quorum lowers the risk of consolidating a coor
 | `make_figures.py` | Draws Figures 1 to 4 as SVG from a results file and exports PNG with headless Chrome or Chromium. |
 | `results/results.json` | The full run reported in the paper (20 seeds), with the quorum and adversarial-share sweeps and the numerical checks of Propositions 1 and 2. |
 | `results/results_v0_absolute_quorum.json` | An earlier lifecycle that failed against forged outcomes, kept for transparency (see below). |
-| `figures/` | Figures 1 to 4 as SVG and PNG. |
+| `results/results_review_branch.json` | The k = 1 run, with the quorum sweep at both observation densities, the ablation set under capacity pressure and paired differences. |
+| `figures/` | Figures 1 to 5 as SVG, and 1 to 4 as PNG. |
 
 ## Running the code
 
@@ -68,8 +69,20 @@ Final means over 20 seeds when 30% of the observations about each target situati
 | First version (ungated) | 0.633 | 0.415 | 0.141 | 0.141 |
 | Surprise-gated | 0.843 | 0.700 | 0.181 | 0.181 |
 | Trust-gated | 0.794 | 0.019 | 0.015 | 0.064 |
-| SLS, fixed quorum | 0.996 | 0.958 | 0.059 | 0.066 |
+| SLS, fixed quorum | 0.999 | 0.989 | 0.059 | 0.042 |
+| SLS, rival-margin quorum | 0.998 | 0.978 | 0.076 | 0.074 |
 | SLS, conflict-scaled quorum | 0.992 | 0.910 | 0.071 | 0.075 |
+
+The headline quorum is k = 1, set by `--headline-quorum` and applied to every policy that does not
+name its own. It dominates the k = 2 used in the first draft of this table on every column: 0.996,
+0.958, 0.059 and 0.066 respectively. `results/results.json` was produced at k = 2 and reproduces
+exactly with `--headline-quorum 2`; `results/results_review_branch.json` is the k = 1 run.
+
+The rival-margin rule raises the quorum by the windowed support of the best rival template rather
+than by the log-odds gap to the model's current top choice, so consolidation needs a margin over the
+competition rather than a bare majority. Paired against the fixed quorum it is significantly better
+on accuracy than the conflict-scaled rule and reaches 0.978 on drifted situations against 0.910,
+with no significant difference in attack success.
 
 The trust-gated policy matches or beats SLS on attack success, but it fails on drifted situations (0.019) because it keeps reinforcing the old behaviour. Conformity also works against the SLS lifecycle once the adversary is faster. At an adversarial share of 0.7 in S2, attack success for SLS with a fixed quorum is 0.744, against 0.354 for the first version (Figure 4).
 
