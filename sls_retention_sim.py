@@ -86,6 +86,7 @@ class Policy:
     confirm_gate: bool = False      # a confirmation may strengthen a stored entry only from a credible source
     confirm_min_history: int = 1    # ... or only from a source that already has a track record
     quorum_min_history: int = 1     # observations a source must have made before it counts toward a quorum
+    cred_frozen: bool = False       # weigh support by credibility when recorded, not when read
     cap: int = 150
     buf_cap: int = 400
 
@@ -240,18 +241,25 @@ class RetentionMemory:
     def rep_add(self, src, positive, amount):
         self._rep(src)[0 if positive else 1] += amount
 
+    def chi_of(self, src, rec):
+        """Credibility of a recorded support entry: current by default, as recorded if frozen."""
+        return rec[1] if self.p.cred_frozen else self.cred(src)
+
     def support(self, sup, t):
         """Credibility-weighted count of distinct sources seen within the recency window.
 
         With quorum_min_history > 1 a source must already have a track record to count, which
         denies a one-shot identity any weight. Honest newcomers are one-shot here too, so this
         trades honest evidence for sybil resistance rather than separating the two for free.
+
+        Credibility is read at query time unless cred_frozen is set, so a farm that earns
+        reputation with forged outcomes retroactively raises the weight of earlier injections.
         """
         if not sup:
             return 0.0
         h = self.p.quorum_min_history
-        return sum(self.cred(s) for s, ts in sup.items()
-                   if t - ts <= WINDOW and (h <= 1 or self.seen.get(s, 0) >= h))
+        return sum(self.chi_of(s, rec) for s, rec in sup.items()
+                   if t - rec[0] <= WINDOW and (h <= 1 or self.seen.get(s, 0) >= h))
 
     # -- read ----------------------------------------------------------------
     def _attend(self, X):
@@ -296,7 +304,7 @@ class RetentionMemory:
             self.rep_add(src, y > 0, 1.0)
         if p.gate == "none":                         # v1: append everything
             st["gate_pass"] += 1
-            self.store(x, tpl, {src: t}, 1.0, t, merge=False)
+            self.store(x, tpl, {src: (t, self.cred(src))}, 1.0, t, merge=False)
             return
         if p.confirm and self.m:
             sims = self.K[:self.m] @ x
@@ -310,7 +318,7 @@ class RetentionMemory:
                 else:
                     if src not in self.sup[i]:
                         self.S[i] += self.cred(src)  # a new independent source adds its credibility
-                    self.sup[i][src] = t
+                    self.sup[i][src] = (t, self.cred(src))
                 st["confirmations"] += 1
                 return
         sc, _ = self.scores(np.array([c]), x[None, :])
@@ -330,7 +338,7 @@ class RetentionMemory:
             return
         st["gate_pass"] += 1
         if not p.use_buffer:
-            self.store(x, tpl, {src: t}, chi if p.gate == "trust" else 1.0, t)
+            self.store(x, tpl, {src: (t, chi)}, chi if p.gate == "trust" else 1.0, t)
             return
         i = self.buffer_add(c, x, tpl, src, y, t)
         self.try_promote(i, t)
@@ -361,7 +369,7 @@ class RetentionMemory:
                 self.bTally[idx] = False             # a surprising observation makes the entry a candidate
         self.bN[idx] += 1
         self.bT[idx] = t
-        self.bSup[idx][src] = t
+        self.bSup[idx][src] = (t, self.cred(src))
         if y != 0 and self.p.use_payoff:
             self.bPay[idx] += 1.0 if y > 0 else 0.0
             self.bPayN[idx] += 1.0
@@ -415,12 +423,15 @@ class RetentionMemory:
             if cand.size:
                 i = int(cand[np.argmax(sims[cand])])
                 if distinct:                         # each source counts once
-                    self.S[i] += sum(self.cred(s) for s in sup if s not in self.sup[i])
+                    self.S[i] += sum(self.chi_of(src, rec) for src, rec in sup.items()
+                                     if src not in self.sup[i])
                 else:
                     self.S[i] += s0
                 self.K[i] = unit(self.K[i] + 0.5 * x)
-                for s, ts in sup.items():
-                    self.sup[i][s] = max(ts, self.sup[i].get(s, ts))
+                for src, rec in sup.items():
+                    prev = self.sup[i].get(src)
+                    if prev is None or rec[0] > prev[0]:
+                        self.sup[i][src] = rec
                 self.stats["store_merge"] += 1
                 return
         if m < p.cap:
@@ -517,35 +528,40 @@ DENSE_ENV = dict(n_sit=60, n_targets=6)      # obs_per_window = 20.0, the densit
 DENSE_SCALE = 20.0 / 6.0                     # so a quorum k compares to k * DENSE_SCALE at that density
 
 
-def main_policies():
+def main_policies(q=1.0):
+    """Policies of the main table. q is the headline quorum; policies that name one keep it."""
+    def P(name, **kw):
+        return Policy(name, quorum=kw.pop("quorum", q), **kw)
+
     return [
         Policy("v1_ungated", gate="none", use_buffer=False, quorum=0.0, use_cred=False, use_payoff=False,
                reconsolidate=False, null_slot=False, strength_prior=False, eviction="fifo", decay=False,
                confirm=False, relative=False),
-        Policy("surprise_gated", gate="surprise", use_buffer=False, confirm=False, relative=False),
-        Policy("trust_gated", gate="trust", use_buffer=False, confirm=False, relative=False),
-        Policy("sls_full"),
-        Policy("sls_adaptive_quorum", quorum=1.0, quorum_gamma=0.25),
-        Policy("sls_no_quorum", quorum=0.0),
-        Policy("sls_no_relative", relative=False),
-        Policy("sls_no_confirmation", confirm=False, relative=False),
-        Policy("sls_no_credibility", use_cred=False),
-        Policy("sls_no_payoff", use_payoff=False),
-        Policy("sls_no_reconsolidation", reconsolidate=False),
-        Policy("sls_fifo_eviction", eviction="fifo"),
-        Policy("sls_no_null_slot", null_slot=False),
+        P("surprise_gated", gate="surprise", use_buffer=False, confirm=False, relative=False),
+        P("trust_gated", gate="trust", use_buffer=False, confirm=False, relative=False),
+        P("sls_full"),
+        P("sls_adaptive_quorum", quorum=1.0, quorum_gamma=0.25),
+        P("sls_no_quorum", quorum=0.0),
+        P("sls_no_relative", relative=False),
+        P("sls_no_confirmation", confirm=False, relative=False),
+        P("sls_no_credibility", use_cred=False),
+        P("sls_no_payoff", use_payoff=False),
+        P("sls_no_reconsolidation", reconsolidate=False),
+        P("sls_fifo_eviction", eviction="fifo"),
+        P("sls_no_null_slot", null_slot=False),
         # Fixes from the code review, each isolated so its effect is paired against sls_full.
-        Policy("sls_gate_first", gate_first=True),
-        Policy("sls_bounded_gate", bounded_surprise=True),
-        Policy("sls_gate_fixed", gate_first=True, bounded_surprise=True),
-        Policy("sls_confirm_gate", confirm_gate=True),
-        Policy("sls_confirm_hist2", confirm_min_history=2),
-        Policy("sls_quorum_hist2", quorum_min_history=2),
-        Policy("sls_v3", gate_first=True, bounded_surprise=True, confirm_gate=True, quorum_min_history=2),
-        Policy("sls_history", confirm_min_history=2, quorum_min_history=2),
-        Policy("sls_cap60", cap=60),                          # store fills, so eviction is exercised
-        Policy("sls_cap60_fifo", cap=60, eviction="fifo"),    # ... and the eviction rule matters
-        Policy("sls_margin_quorum", quorum=1.0, quorum_gamma=1.0, quorum_scale="rival"),
+        P("sls_gate_first", gate_first=True),
+        P("sls_bounded_gate", bounded_surprise=True),
+        P("sls_gate_fixed", gate_first=True, bounded_surprise=True),
+        P("sls_confirm_gate", confirm_gate=True),
+        P("sls_confirm_hist2", confirm_min_history=2),
+        P("sls_quorum_hist2", quorum_min_history=2),
+        P("sls_v3", gate_first=True, bounded_surprise=True, confirm_gate=True, quorum_min_history=2),
+        P("sls_history", confirm_min_history=2, quorum_min_history=2),
+        P("sls_cap60", cap=60),                          # store fills, so eviction is exercised
+        P("sls_cap60_fifo", cap=60, eviction="fifo"),    # ... and the eviction rule matters
+        P("sls_margin_quorum", quorum=1.0, quorum_gamma=1.0, quorum_scale="rival"),
+        P("sls_cred_frozen", cred_frozen=True),
     ]
 
 
@@ -773,6 +789,9 @@ def main():
     ap.add_argument("--workers", type=int, default=8)
     ap.add_argument("--out", default="results.json")
     ap.add_argument("--quick", action="store_true")
+    ap.add_argument("--headline-quorum", type=float, default=1.0,
+                    help="quorum of the policies that do not name one; "
+                         "pass 2 to reproduce results/results.json exactly")
     a = ap.parse_args()
     if a.quick:
         a.seeds, a.T = 2, 2000
@@ -781,7 +800,7 @@ def main():
     jobs = []
     for scen, kw in SCENARIOS.items():
         for s in range(a.seeds):
-            jobs.append(("main", scen, dict(base_env, **kw), 1000 + s, main_policies()))
+            jobs.append(("main", scen, dict(base_env, **kw), 1000 + s, main_policies(a.headline_quorum)))
     QS = [0, 1, 2, 3, 4, 6]
     quorum_pols = [replace(Policy("sls_full"), name=f"sls_q{kq:g}", quorum=float(kq)) for kq in QS]
     # Same relative quorum, 3.33x the observation density: does the separation the propositions
@@ -795,12 +814,12 @@ def main():
     # Under the published cap the SLS store never fills and acc_unknown pins at exactly 1.000
     # for 15 of 21 policies, so most ablations cannot separate. Re-run them under capacity
     # pressure, where the metric has room to move.
-    pressure_pols = [replace(pl, cap=60) for pl in main_policies()
+    pressure_pols = [replace(pl, cap=60) for pl in main_policies(a.headline_quorum)
                      if pl.name.startswith("sls") and not pl.name.startswith("sls_cap")]
     for scen in ["clean", "sybil_forged", "farmed_forged"]:
         for s_ in range(a.seeds):
             jobs.append(("pressure", scen, dict(base_env, **SCENARIOS[scen]), 1000 + s_, pressure_pols))
-    rho_pols = [p for p in main_policies() if p.name in ("v1_ungated", "trust_gated", "sls_full", "sls_adaptive_quorum")]
+    rho_pols = [p for p in main_policies(a.headline_quorum) if p.name in ("v1_ungated", "trust_gated", "sls_full", "sls_adaptive_quorum")]
     for scen in ["sybil_forged", "farmed_forged"]:
         for rho in [0.1, 0.3, 0.5, 0.7]:
             for s in range(a.seeds):
@@ -838,7 +857,8 @@ def main():
                     constants=dict(TAU=TAU, NULL_LOGIT=NULL_LOGIT, BETA=BETA, LAMBDA=LAMBDA, DELTA_K=DELTA_K,
                                    ETA=ETA, DECAY=DECAY, S0=S0, TH_S=TH_S, TH_P=TH_P, TH_C=TH_C,
                                    CHI_MIN=CHI_MIN, CHI_UNIFORM=CHI_UNIFORM, FARM_IDS=FARM_IDS, WINDOW=WINDOW),
-                    policies=[asdict(p) for p in main_policies()], scenarios=SCENARIOS),
+                    headline_quorum=a.headline_quorum,
+                    policies=[asdict(p) for p in main_policies(a.headline_quorum)], scenarios=SCENARIOS),
         reduction_check=reduction_check(),
         quorum_theory=quorum_study(),
         race_theory=race_study(),
