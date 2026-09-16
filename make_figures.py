@@ -16,6 +16,8 @@ import time
 import sys
 from pathlib import Path
 
+from sls_retention_sim import binom_tail   # single source of truth
+
 INK, INK2, MUTED, GRID, AXIS, SURF = "#0b0b0b", "#52514e", "#898781", "#e1e0d9", "#c3c2b7", "#ffffff"
 SERIES = ["#2a78d6", "#eb6834", "#1baf7a", "#eda100"]      # categorical slots 1-4, fixed order
 RAMP = ["#86b6ef", "#3987e5", "#1c5cab", "#0d366b"]        # ordinal blue ramp for rho
@@ -192,14 +194,6 @@ def fig1(path):
 # ---------------------------------------------------------------------------
 # Figure 2: quorum trade-off (Proposition 2)
 # ---------------------------------------------------------------------------
-def binom_tail(n, p, k):
-    if k <= 0:
-        return 1.0
-    if k > n:
-        return 0.0
-    return sum(math.comb(n, j) * p ** j * (1 - p) ** (n - j) for j in range(k, n + 1))
-
-
 def fig2(res, path):
     qt = res["quorum_theory"]
     N, q, ca, ch = qt["N"], qt["q"], qt["chi_adv"], qt["chi_hon"]
@@ -281,9 +275,14 @@ def fig4(res, path, policies):
     rhos = [0.1, 0.3, 0.5, 0.7]
     panels = [("sybil_forged", "(a) S2: fresh identities, forged outcomes", 100),
               ("farmed_forged", "(b) S3: reputable identities, forged outcomes", 600)]
+    # One shared y range wide enough for every error bar; a fixed 0.8 top clipped them silently.
+    top = max(m + h for scen, _, _ in panels for pol in policies for rho in rhos
+              for m, h in [rho_sum[f"{scen}_rho{rho:g}"][pol]["asr"]["final"]])
+    ymax = min(1.0, max(0.8, math.ceil(top / 0.2 - 1e-9) * 0.2))
+    yticks = [round(0.2 * i, 1) for i in range(int(round(ymax / 0.2)) + 1)]
     for idx, (scen, title, px) in enumerate(panels):
-        P = Panel(s, px, 100, 350, 260, (0.0, 0.8), (0, 0.8), cid=f"q{idx}")
-        P.axes(rhos, [0, 0.2, 0.4, 0.6, 0.8], lambda v: f"{v:g}", pct,
+        P = Panel(s, px, 100, 350, 260, (0.0, 0.8), (0, ymax), cid=f"q{idx}")
+        P.axes(rhos, yticks, lambda v: f"{v:g}", pct,
                "Adversarial share of observations, ρ", "Attack success rate", title)
         for j, (c, p) in enumerate(zip(SERIES, policies)):
             off = (j - 1.5) * 0.012
@@ -291,7 +290,7 @@ def fig4(res, path, policies):
             for rho in rhos:
                 m, h = rho_sum[f"{scen}_rho{rho:g}"][p]["asr"]["final"]
                 X = P.X(rho + off)
-                s.line(X, P.Y(max(m - h, 0.0)), X, P.Y(min(m + h, 0.8)), c, 1.4)
+                s.line(X, P.Y(max(m - h, 0.0)), X, P.Y(min(m + h, ymax)), c, 1.4)
                 pts.append((X, P.Y(m)))
             s.polyline(pts, c, 2.0, clip=f"q{idx}")
             for X, Y in pts:

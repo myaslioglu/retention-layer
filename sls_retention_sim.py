@@ -502,12 +502,29 @@ def job(args):
     return exp, scen, seed, {p.name: run_policy(world, p) for p in pols}
 
 
+# Two-sided 95% Student-t critical values, df 1..30; Cornish-Fisher expansion beyond.
+_T95 = {1: 12.706, 2: 4.303, 3: 3.182, 4: 2.776, 5: 2.571, 6: 2.447, 7: 2.365, 8: 2.306,
+        9: 2.262, 10: 2.228, 11: 2.201, 12: 2.179, 13: 2.160, 14: 2.145, 15: 2.131,
+        16: 2.120, 17: 2.110, 18: 2.101, 19: 2.093, 20: 2.086, 21: 2.080, 22: 2.074,
+        23: 2.069, 24: 2.064, 25: 2.060, 26: 2.056, 27: 2.052, 28: 2.048, 29: 2.045, 30: 2.042}
+
+
+def t95(df):
+    if df < 1:
+        return float("nan")
+    if df in _T95:
+        return _T95[df]
+    z = 1.959963985
+    return z + (z ** 3 + z) / (4 * df) + (5 * z ** 5 + 16 * z ** 3 + 3 * z) / (96 * df ** 2)
+
+
 def ci95(vals):
     v = np.asarray([x for x in vals if not (isinstance(x, float) and math.isnan(x))], float)
     if v.size == 0:
         return float("nan"), float("nan")
-    tcrit = {2: 12.71, 3: 4.30, 5: 2.78, 10: 2.26, 20: 2.093}.get(v.size, 1.96)
-    return float(v.mean()), (float(tcrit * v.std(ddof=1) / math.sqrt(v.size)) if v.size > 1 else 0.0)
+    if v.size == 1:
+        return float(v[0]), 0.0
+    return float(v.mean()), float(t95(v.size - 1) * v.std(ddof=1) / math.sqrt(v.size))
 
 
 METRICS = ["acc_all", "acc_known_stable", "acc_unknown", "acc_drifted", "acc_target", "asr",
@@ -566,10 +583,12 @@ def quorum_study(seed=0, trials=200_000, N=20, q=0.8, chi_adv=0.5, chi_hon=0.8):
             L = 300
             hc = (rng.random((4_000, L)) >= rho) & (rng.random((4_000, L)) < q)
             reach = np.cumsum(hc, axis=1) * chi_hon >= kq - 1e-9
-            lat_mc = float((reach.argmax(1) + 1).mean())
+            reached = reach.any(1)                       # rows that never reach the quorum are censored at L
+            lat_mc = float(np.where(reached, reach.argmax(1) + 1, L).mean())
             rows.append(dict(rho=rho, quorum=kq, adv_needed=ka, honest_needed=kh,
                              p_adv_exact=p_adv, p_adv_mc=p_adv_mc, chernoff_bound=chern,
-                             latency_exact=lat, latency_mc=lat_mc))
+                             latency_exact=lat, latency_mc=lat_mc,
+                             latency_mc_censored=float(1.0 - reached.mean())))
     return dict(N=N, q=q, chi_adv=chi_adv, chi_hon=chi_hon, rows=rows)
 
 
@@ -684,7 +703,9 @@ def main():
                for exp, d1 in grouped.items()}
 
     out = dict(
-        config=dict(env=asdict(Env(**base_env)), seeds=a.seeds, elapsed_sec=elapsed,
+        config=dict(env=asdict(Env(**base_env)),
+                    envs={scen: asdict(Env(**dict(base_env, **kw))) for scen, kw in SCENARIOS.items()},
+                    seeds=a.seeds, elapsed_sec=elapsed,
                     constants=dict(TAU=TAU, NULL_LOGIT=NULL_LOGIT, BETA=BETA, LAMBDA=LAMBDA, DELTA_K=DELTA_K,
                                    ETA=ETA, DECAY=DECAY, S0=S0, TH_S=TH_S, TH_P=TH_P, TH_C=TH_C,
                                    CHI_MIN=CHI_MIN, CHI_UNIFORM=CHI_UNIFORM, FARM_IDS=FARM_IDS, WINDOW=WINDOW),
