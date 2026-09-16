@@ -71,6 +71,7 @@ class Policy:
     use_buffer: bool = True         # two tiers: episodic buffer -> retention store
     quorum: float = 2.0             # credibility-weighted support needed for consolidation (0 = immediate)
     quorum_gamma: float = 0.0       # conflict scaling of the quorum: k = quorum + gamma * conflict
+    quorum_scale: str = "logodds"   # "logodds": dispreference of tpl | "rival": windowed rival support
     use_cred: bool = True
     use_payoff: bool = True
     reconsolidate: bool = True
@@ -387,16 +388,18 @@ class RetentionMemory:
     def try_promote(self, i, t):
         if self.bTally[i]:
             return
-        sup = self.bSup[i]
+        p, sup = self.p, self.bSup[i]
         q = self.support(sup, t)
-        k_eff = self.p.quorum
-        if self.p.quorum_gamma > 0:
-            k_eff += self.p.quorum_gamma * self.conflict(int(self.bC[i]), self.bK[i], int(self.bV[i]))
+        rival = self.rival_support(i, t) if (p.relative or p.quorum_scale == "rival") else 0.0
+        k_eff = p.quorum
+        if p.quorum_gamma > 0:
+            k_eff += p.quorum_gamma * (rival if p.quorum_scale == "rival"
+                                       else self.conflict(int(self.bC[i]), self.bK[i], int(self.bV[i])))
         if q + 1e-9 < k_eff:
             return
-        if self.p.use_payoff and self.bPayN[i] > 0 and self.bPay[i] / self.bPayN[i] < 0.5:
+        if p.use_payoff and self.bPayN[i] > 0 and self.bPay[i] / self.bPayN[i] < 0.5:
             return
-        if self.p.relative and q <= self.rival_support(i, t):
+        if p.relative and q <= rival:
             self.stats["blocked_by_rival"] += 1
             return
         self.store(self.bK[i].copy(), int(self.bV[i]), dict(sup), max(q, 1e-3), t, distinct=True)
@@ -542,6 +545,7 @@ def main_policies():
         Policy("sls_history", confirm_min_history=2, quorum_min_history=2),
         Policy("sls_cap60", cap=60),                          # store fills, so eviction is exercised
         Policy("sls_cap60_fifo", cap=60, eviction="fifo"),    # ... and the eviction rule matters
+        Policy("sls_margin_quorum", quorum=1.0, quorum_gamma=1.0, quorum_scale="rival"),
     ]
 
 
@@ -690,6 +694,25 @@ def race_study(seed=1, trials=5_000, q=0.8, chi_adv=0.5, chi_hon=0.8, L=1500):
     return dict(q=q, chi_adv=chi_adv, chi_hon=chi_hon, rows=rows)
 
 
+def farm_study(chi_farm=0.9, q=0.8, chi_hon=0.8, rho=0.3, ids=(1, 2, 5, 10, 20, 50)):
+    """Reputation farming saturates; sybil injection does not.
+
+    Consolidation counts each source once, so an adversary holding n identities of credibility
+    chi_farm can never push a false template past n * chi_farm however long it keeps injecting.
+    Any quorum above that ceiling blocks the farm outright, at a latency cost that grows only
+    linearly in the ceiling. A sybil adversary with free identities has no such ceiling, which
+    is why the two attacks need different defences.
+    """
+    rows = []
+    for n in ids:
+        ceiling = n * chi_farm
+        kh = math.ceil(ceiling / chi_hon - 1e-9) + 1        # honest sources needed to clear it
+        rows.append(dict(n_identities=n, farm_support_ceiling=ceiling,
+                         quorum_that_blocks=ceiling, honest_sources_needed=kh,
+                         honest_latency=kh / ((1 - rho) * q)))
+    return dict(chi_farm=chi_farm, q=q, chi_hon=chi_hon, rho=rho, rows=rows)
+
+
 # ---------------------------------------------------------------------------
 # Proposition 1: a Retention block with empty memory (or zero output projection)
 # is exactly the base pre-LN Transformer block
@@ -769,6 +792,14 @@ def main():
         for s in range(a.seeds):
             jobs.append(("quorum", scen, dict(base_env, **SCENARIOS[scen]), 1000 + s, quorum_pols))
             jobs.append(("quorum_dense", scen, dict(dense_env, **SCENARIOS[scen]), 1000 + s, dense_pols))
+    # Under the published cap the SLS store never fills and acc_unknown pins at exactly 1.000
+    # for 15 of 21 policies, so most ablations cannot separate. Re-run them under capacity
+    # pressure, where the metric has room to move.
+    pressure_pols = [replace(pl, cap=60) for pl in main_policies()
+                     if pl.name.startswith("sls") and not pl.name.startswith("sls_cap")]
+    for scen in ["clean", "sybil_forged", "farmed_forged"]:
+        for s_ in range(a.seeds):
+            jobs.append(("pressure", scen, dict(base_env, **SCENARIOS[scen]), 1000 + s_, pressure_pols))
     rho_pols = [p for p in main_policies() if p.name in ("v1_ungated", "trust_gated", "sls_full", "sls_adaptive_quorum")]
     for scen in ["sybil_forged", "farmed_forged"]:
         for rho in [0.1, 0.3, 0.5, 0.7]:
@@ -811,6 +842,7 @@ def main():
         reduction_check=reduction_check(),
         quorum_theory=quorum_study(),
         race_theory=race_study(),
+        farm_theory=farm_study(),
         summary=summary,
         paired=dict(reference=PAIRED_REF, diffs=paired),
     )
@@ -850,6 +882,11 @@ def main():
                 star = "*" if not math.isnan(h) and abs(m) > h else " "
                 cells.append(f"{m:+7.4f}+-{h:6.4f}{star}")
             print(f"{pname:24s} " + " ".join(f"{c:>18s}" for c in cells))
+    print(f"\n== farming ceiling: a farm of n identities cannot exceed n * {out['farm_theory']['chi_farm']:g} support")
+    for r in out["farm_theory"]["rows"]:
+        print(f"  n={r['n_identities']:3d} ceiling={r['farm_support_ceiling']:5.1f} "
+              f"blocked by quorum > {r['quorum_that_blocks']:5.1f}  "
+              f"honest sources needed={r['honest_sources_needed']:3d}  latency={r['honest_latency']:6.1f}")
     print("\n== race study (Proposition 2c): P(false template first)")
     for r in out["race_theory"]["rows"]:
         print(r)
