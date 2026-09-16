@@ -83,6 +83,7 @@ class Policy:
     gate_first: bool = False        # run the encoding gate before the tally short-circuit
     bounded_surprise: bool = False  # saturate the surprise term so payoff and prestige stay commensurate
     confirm_gate: bool = False      # a confirmation may strengthen a stored entry only from a credible source
+    confirm_min_history: int = 1    # ... or only from a source that already has a track record
     quorum_min_history: int = 1     # observations a source must have made before it counts toward a quorum
     cap: int = 150
     buf_cap: int = 400
@@ -303,7 +304,7 @@ class RetentionMemory:
                 i = int(match[np.argmax(sims[match])])
                 if y < 0:
                     self.S[i] *= math.exp(-ETA)      # observed failure weakens the template
-                elif p.confirm_gate and self.cred(src) < CHI_MIN:
+                elif (p.confirm_gate and self.cred(src) < CHI_MIN) or self.seen.get(src, 0) < p.confirm_min_history:
                     st["confirm_blocked"] += 1       # this path bypasses the gate, quorum and rival test
                 else:
                     if src not in self.sup[i]:
@@ -521,8 +522,10 @@ def main_policies():
         Policy("sls_bounded_gate", bounded_surprise=True),
         Policy("sls_gate_fixed", gate_first=True, bounded_surprise=True),
         Policy("sls_confirm_gate", confirm_gate=True),
+        Policy("sls_confirm_hist2", confirm_min_history=2),
         Policy("sls_quorum_hist2", quorum_min_history=2),
         Policy("sls_v3", gate_first=True, bounded_surprise=True, confirm_gate=True, quorum_min_history=2),
+        Policy("sls_history", confirm_min_history=2, quorum_min_history=2),
     ]
 
 
@@ -567,15 +570,37 @@ def ci95(vals):
 
 METRICS = ["acc_all", "acc_known_stable", "acc_unknown", "acc_drifted", "acc_target", "asr",
            "asr_known_targets", "asr_unknown_targets"]
+PAIRED_REF = "sls_full"      # policy every paired difference is taken against
 STATS = ["gate_pass", "gate_block", "store_insert", "store_merge", "promoted", "evicted", "dropped",
          "confirmations", "confirm_blocked", "tallies", "blocked_by_rival"]
+
+
+def final_by_seed(runs, kname, T):
+    """Per-seed final value of one metric, averaged over the last 1000 steps."""
+    return [np.nanmean([e[kname] for e in r["curve"] if e["t"] > T - 1000]) for r in runs]
+
+
+def paired_diff(runs_a, runs_b, kname, T):
+    """Paired mean difference a - b with a 95% CI.
+
+    Every policy sees the same event stream under a given seed, and pool.map preserves job
+    order, so entry i of each list is the same seed. Pairing removes the between-seed
+    variance that dominates the unpaired intervals.
+    """
+    d = np.asarray(final_by_seed(runs_a, kname, T), float) - np.asarray(final_by_seed(runs_b, kname, T), float)
+    d = d[~np.isnan(d)]
+    if d.size == 0:
+        return float("nan"), float("nan")
+    if d.size == 1:
+        return float(d[0]), 0.0
+    return float(d.mean()), float(t95(d.size - 1) * d.std(ddof=1) / math.sqrt(d.size))
 
 
 def summarize(runs, T):
     """runs: per-seed results for one policy -> final (t > T-1000) and time-averaged metrics with 95% CIs."""
     out = {}
     for kname in METRICS:
-        fin = [np.nanmean([e[kname] for e in r["curve"] if e["t"] > T - 1000]) for r in runs]
+        fin = final_by_seed(runs, kname, T)
         auc = [np.nanmean([e[kname] for e in r["curve"]]) for r in runs]
         out[kname] = dict(final=ci95(fin), mean_over_time=ci95(auc))
     out["online_acc"] = ci95([r["online_acc"] for r in runs])
@@ -739,6 +764,16 @@ def main():
             grouped.setdefault(exp, {}).setdefault(scen, {}).setdefault(pname, []).append(r)
     summary = {exp: {scen: {p: summarize(runs, a.T) for p, runs in d2.items()} for scen, d2 in d1.items()}
                for exp, d1 in grouped.items()}
+    paired = {}
+    for exp, d1 in grouped.items():
+        for scen, d2 in d1.items():
+            if PAIRED_REF not in d2:
+                continue
+            for pname, runs in d2.items():
+                if pname == PAIRED_REF:
+                    continue
+                paired.setdefault(exp, {}).setdefault(scen, {})[pname] = {
+                    k: paired_diff(runs, d2[PAIRED_REF], k, a.T) for k in METRICS}
 
     out = dict(
         config=dict(env=asdict(Env(**base_env)),
@@ -752,6 +787,7 @@ def main():
         quorum_theory=quorum_study(),
         race_theory=race_study(),
         summary=summary,
+        paired=dict(reference=PAIRED_REF, diffs=paired),
     )
     with open(a.out, "w") as f:
         json.dump(out, f, indent=1)
@@ -774,6 +810,19 @@ def main():
     print("\n== rho sweep: (acc_all, ASR) final")
     for scen, d2 in summary["rho"].items():
         print(scen, {p: (round(sm["acc_all"]["final"][0], 3), round(sm["asr"]["final"][0], 3)) for p, sm in d2.items()})
+    print(f"\n== paired differences against {PAIRED_REF} (same event stream per seed); * = CI excludes 0")
+    for scen in SCENARIOS:
+        if scen not in paired.get("main", {}):
+            continue
+        print(f"-- main / {scen}")
+        print(f"{'policy':24s} " + " ".join(f"{k:>18s}" for k in ["acc_all", "acc_drifted", "asr"]))
+        for pname, dd in paired["main"][scen].items():
+            cells = []
+            for k in ["acc_all", "acc_drifted", "asr"]:
+                m, h = dd[k]
+                star = "*" if not math.isnan(h) and abs(m) > h else " "
+                cells.append(f"{m:+7.4f}+-{h:6.4f}{star}")
+            print(f"{pname:24s} " + " ".join(f"{c:>18s}" for c in cells))
     print("\n== race study (Proposition 2c): P(false template first)")
     for r in out["race_theory"]["rows"]:
         print(r)
