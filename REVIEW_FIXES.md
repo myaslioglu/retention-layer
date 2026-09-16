@@ -100,3 +100,66 @@ observations come from one-shot newcomers and are now discarded.
 This is the sharpest result of the review: a distinct-identity quorum is only as
 strong as the cost of an identity, and the cheapest way to impose that cost —
 demanding a track record — is exactly what a farm already has.
+
+## 4. The quorum works; the published configuration hides it
+
+What a quorum can ever reach is set by how many observations about one situation
+fall inside a recency window:
+
+    obs_per_window = (1 - p_interact) * WINDOW / n_sit
+
+It does not depend on `T`. The published settings give **5.97**, while
+`quorum_study` checks Proposition 2 at **N = 20**. The simulation never enters
+the regime the proposition describes, which is why the sweep read as a flat
+attack success with accuracy collapsing above k = 3: at k = 6 the rule needs 8
+distinct honest sources inside a window that delivers about 3.4, so the store
+starves (`mem` 150 -> 48, `acc_all` 0.654) and the low attack success is bought
+by forgetting everything rather than by filtering.
+
+Re-running the same relative quorums at `n_sit = 60`, which gives exactly 20
+observations per window, gives the behaviour the propositions predict.
+
+| relative k | 6.0 obs/window: acc / drift / ASR | 20.0 obs/window: acc / drift / ASR |
+|:--|:--|:--|
+| 0 | 0.989 / 0.945 / 0.053 | 0.991 / 0.940 / 0.021 |
+| 1 | 0.993 / 0.989 / 0.059 | 0.995 / 1.000 / 0.029 |
+| 2 | 0.990 / 0.958 / 0.059 | **0.997 / 1.000 / 0.010** |
+| 3 | 0.972 / 0.850 / 0.073 | 0.979 / 0.906 / 0.002 |
+| 4 | 0.912 / 0.641 / 0.038 | 0.853 / 0.528 / 0.002 |
+
+(S2, fresh identities with forged outcomes. Under S3 the dense run reaches
+attack success 0.000 at k = 2 while holding drift accuracy at 1.000.)
+
+Attack success now falls monotonically in the quorum instead of staying flat,
+and the accuracy cost arrives three steps later. The mechanism does what the
+paper claims; the experiment was run where it could not show it. Report the
+quorum in units of `obs_per_window`, and run the headline sweep at a density
+that reaches the theory's regime.
+
+## 6 and 7. Capacity pressure, which the published cap never applies
+
+`acc_unknown` is exactly 1.0000 for 15 of 21 policies, so the metric carries no
+information and most ablations cannot separate on it. The cause is the same in
+both cases: the SLS store peaks near 135 against a cap of 150, `evicted` is 0
+for every SLS policy, and `sls_fifo_eviction` was therefore identical to
+`sls_full` in all four scenarios.
+
+At `cap = 60` the store fills and the eviction rule matters a great deal
+(S2, forged outcomes):
+
+| policy | acc | acc_unknown | drift | ASR | evicted | dropped |
+|:--|--:|--:|--:|--:|--:|--:|
+| `sls_full` (cap 150) | 0.990 | 1.0000 | 0.958 | 0.059 | 0 | 0 |
+| `sls_cap60` (strength) | 0.712 | 0.618 | 0.127 | 0.016 | 54 | 193 |
+| `sls_cap60_fifo` | 0.693 | 0.506 | 0.454 | 0.112 | 261 | 0 |
+
+Strength eviction under pressure reproduces the trust-gated failure mode: 193
+promotions are refused outright because the weakest stored entry is already
+stronger, so drift adaptation dies (0.127). FIFO keeps adapting (0.454) and pays
+for it in attack success.
+
+A second caveat for Table 3: the three baselines all run saturated at `mem` 150
+with heavy eviction (v1 evicts 4656, surprise-gated 1596) while no SLS policy
+ever fills. Part of the reported gap is that SLS stores less, not only that it
+stores better. The `pressure` experiment re-runs the ablation set at `cap = 60`
+so the comparison can be made at equal pressure.
