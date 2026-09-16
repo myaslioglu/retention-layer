@@ -298,6 +298,57 @@ def fig4(res, path, policies):
     s.save(path)
 
 
+def fig5(res, path, scen="sybil_forged"):
+    """Attack success and drift accuracy against relative quorum, at two observation densities.
+
+    A quorum is an absolute credibility count, but what it can reach is bounded by how many
+    observations about one situation fall inside a recency window. The published settings give
+    5.97 while Proposition 2 is checked at 20, so the sweep never entered the regime the
+    proposition describes.
+    """
+    if "quorum_dense" not in res["summary"]:
+        return False
+    cfg = res["config"]
+    runs = [(res["summary"]["quorum"][scen], cfg["obs_per_window"], SERIES[0], "published"),
+            (res["summary"]["quorum_dense"][scen], cfg["obs_per_window_dense"], SERIES[1], "theory density")]
+    ks = sorted({float(n[5:]) for n in runs[0][0] if n.startswith("sls_q")})
+
+    s = Svg(1000, 470)
+    x = 60
+    for _, dens, c, tag in runs:
+        lab = f"{dens:.1f} observations per situation per window ({tag})"
+        s.line(x, 27, x + 26, 27, c, 3)
+        s.text(x + 32, 32, lab, 15, INK2)
+        x += 32 + 8.3 * len(lab) + 26
+
+    panels = [("asr", "Attack success rate", "(a) False template reproduced", 100),
+              ("acc_drifted", "Accuracy, drifted situations", "(b) Cost paid on the true templates", 600)]
+    for idx, (metric, ylabel, title, px) in enumerate(panels):
+        top = max(m + h for sm, _, _, _ in runs for k in ks
+                  for m, h in [sm[f"sls_q{k:g}"][metric]["final"]])
+        ymax = min(1.0, math.ceil(top / 0.05 - 1e-9) * 0.05)
+        step = 0.2 if ymax > 0.4 else (0.05 if ymax <= 0.2 else 0.1)
+        yticks = [round(step * i, 2) for i in range(int(round(ymax / step)) + 1)]
+        P = Panel(s, px, 100, 350, 260, (-0.2, max(ks) + 0.2), (0, ymax), cid=f"d{idx}")
+        P.axes(ks, yticks, lambda v: f"{v:g}", pct,
+               "Quorum k, in credibility units", ylabel, title)
+        for j, (sm, _, c, _) in enumerate(runs):
+            off = (j - 0.5) * 0.06
+            pts = []
+            for k in ks:
+                m, h = sm[f"sls_q{k:g}"][metric]["final"]
+                X = P.X(k + off)
+                s.line(X, P.Y(max(m - h, 0.0)), X, P.Y(min(m + h, ymax)), c, 1.4)
+                pts.append((X, P.Y(m)))
+            s.polyline(pts, c, 2.2, clip=f"d{idx}")
+            for X, Y in pts:
+                s.dot(X, Y, c, 4.5)
+    s.text(100, 440, "Same relative quorum on both curves: the dense run scales k by the ratio of the "
+                     "two densities. Bars are 95% intervals over 20 seeds.", 14, MUTED)
+    s.save(path)
+    return True
+
+
 def find_chrome():
     """Browser for PNG export: $CHROME, then Google Chrome on macOS, then Chrome or Chromium on PATH."""
     if os.environ.get("CHROME"):
@@ -359,6 +410,8 @@ def main():
     fig4(res, out / "fig4_majority.svg", POLICIES)
     sizes = {"fig1_architecture": (1000, 600), "fig2_quorum": (1000, 480), "fig3_dynamics": (1000, 760),
              "fig4_majority": (1000, 470)}
+    if fig5(res, out / "fig5_density.svg"):
+        sizes["fig5_density"] = (1000, 470)
     chrome = find_chrome()
     if chrome is None:
         print("SVG files written; PNG export skipped because Chrome or Chromium was not found (set CHROME).")
