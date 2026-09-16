@@ -80,6 +80,10 @@ class Policy:
     decay: bool = True
     confirm: bool = True            # record support for stored templates and for the model's current behaviour
     relative: bool = True           # consolidate only when support exceeds every rival template's support
+    gate_first: bool = False        # run the encoding gate before the tally short-circuit
+    bounded_surprise: bool = False  # saturate the surprise term so payoff and prestige stay commensurate
+    confirm_gate: bool = False      # a confirmation may strengthen a stored entry only from a credible source
+    quorum_min_history: int = 1     # observations a source must have made before it counts toward a quorum
     cap: int = 150
     buf_cap: int = 400
 
@@ -213,8 +217,10 @@ class RetentionMemory:
         self.bPay = np.zeros(B)
         self.bPayN = np.zeros(B)
         self.rep = {}
+        self.seen = {}                               # per source: how many observations it has made so far
         self.stats = dict(obs=0, gate_pass=0, buf_insert=0, store_insert=0, store_merge=0,
-                          evicted=0, dropped=0, promoted=0, confirmations=0, tallies=0, blocked_by_rival=0)
+                          evicted=0, dropped=0, promoted=0, confirmations=0, tallies=0, blocked_by_rival=0,
+                          confirm_blocked=0, gate_block=0)
 
     # -- credibility (prestige earned by success) --------------------------
     def _rep(self, src):
@@ -233,8 +239,17 @@ class RetentionMemory:
         self._rep(src)[0 if positive else 1] += amount
 
     def support(self, sup, t):
-        """Credibility-weighted count of distinct sources seen within the recency window."""
-        return sum(self.cred(s) for s, ts in sup.items() if t - ts <= WINDOW) if sup else 0.0
+        """Credibility-weighted count of distinct sources seen within the recency window.
+
+        With quorum_min_history > 1 a source must already have a track record to count, which
+        denies a one-shot identity any weight. Honest newcomers are one-shot here too, so this
+        trades honest evidence for sybil resistance rather than separating the two for free.
+        """
+        if not sup:
+            return 0.0
+        h = self.p.quorum_min_history
+        return sum(self.cred(s) for s, ts in sup.items()
+                   if t - ts <= WINDOW and (h <= 1 or self.seen.get(s, 0) >= h))
 
     # -- read ----------------------------------------------------------------
     def _attend(self, X):
@@ -256,9 +271,25 @@ class RetentionMemory:
         return base + LAMBDA * (R @ self.w.E.T), att
 
     # -- write path ------------------------------------------------------------
+    def gate_ok(self, surprise, pay, chi):
+        """SLS encoding gate: surprise (copy when uncertain), payoff bias, prestige bias.
+
+        The published form is linear in an unbounded surprise excess, so once the tally branch
+        has removed everything with surprise <= S0 the first term alone decides every case and
+        the other two are inert. The bounded form saturates it and keeps the three commensurate.
+        """
+        p = self.p
+        if p.gate == "surprise":
+            return surprise > S0
+        if p.gate == "trust":
+            return chi >= CHI_MIN
+        s_term = math.tanh(surprise / S0 - 1.0) if p.bounded_surprise else (surprise - S0)
+        return TH_S * s_term + TH_P * (pay - 0.5) + TH_C * (chi - 0.5) > 0
+
     def observe(self, c, x, tpl, src, y, t):
         p, st = self.p, self.stats
         st["obs"] += 1
+        self.seen[src] = self.seen.get(src, 0) + 1
         if y != 0:                                   # vicarious outcome -> demonstrator reputation
             self.rep_add(src, y > 0, 1.0)
         if p.gate == "none":                         # v1: append everything
@@ -272,6 +303,8 @@ class RetentionMemory:
                 i = int(match[np.argmax(sims[match])])
                 if y < 0:
                     self.S[i] *= math.exp(-ETA)      # observed failure weakens the template
+                elif p.confirm_gate and self.cred(src) < CHI_MIN:
+                    st["confirm_blocked"] += 1       # this path bypasses the gate, quorum and rival test
                 else:
                     if src not in self.sup[i]:
                         self.S[i] += self.cred(src)  # a new independent source adds its credibility
@@ -280,20 +313,18 @@ class RetentionMemory:
                 return
         sc, _ = self.scores(np.array([c]), x[None, :])
         surprise = -log_softmax(sc[0])[tpl]
+        chi = self.cred(src)
+        pay = 0.5 if (y == 0 or not p.use_payoff) else (1.0 if y > 0 else 0.0)
+        if p.gate_first and not self.gate_ok(surprise, pay, chi):
+            st["gate_block"] += 1                    # gate the tally too, not just the encoding
+            return
         if p.confirm and surprise <= S0:             # the model already behaves this way: tally the support
             if p.relative:
                 self.buffer_add(c, x, tpl, src, y, t, tally=True)
             st["tallies"] += 1
             return
-        chi = self.cred(src)
-        pay = 0.5 if (y == 0 or not p.use_payoff) else (1.0 if y > 0 else 0.0)
-        if p.gate == "surprise":
-            ok = surprise > S0
-        elif p.gate == "trust":
-            ok = chi >= CHI_MIN
-        else:
-            ok = TH_S * (surprise - S0) + TH_P * (pay - 0.5) + TH_C * (chi - 0.5) > 0
-        if not ok:
+        if not p.gate_first and not self.gate_ok(surprise, pay, chi):
+            st["gate_block"] += 1
             return
         st["gate_pass"] += 1
         if not p.use_buffer:
@@ -485,6 +516,13 @@ def main_policies():
         Policy("sls_no_reconsolidation", reconsolidate=False),
         Policy("sls_fifo_eviction", eviction="fifo"),
         Policy("sls_no_null_slot", null_slot=False),
+        # Fixes from the code review, each isolated so its effect is paired against sls_full.
+        Policy("sls_gate_first", gate_first=True),
+        Policy("sls_bounded_gate", bounded_surprise=True),
+        Policy("sls_gate_fixed", gate_first=True, bounded_surprise=True),
+        Policy("sls_confirm_gate", confirm_gate=True),
+        Policy("sls_quorum_hist2", quorum_min_history=2),
+        Policy("sls_v3", gate_first=True, bounded_surprise=True, confirm_gate=True, quorum_min_history=2),
     ]
 
 
@@ -529,8 +567,8 @@ def ci95(vals):
 
 METRICS = ["acc_all", "acc_known_stable", "acc_unknown", "acc_drifted", "acc_target", "asr",
            "asr_known_targets", "asr_unknown_targets"]
-STATS = ["gate_pass", "store_insert", "store_merge", "promoted", "evicted", "dropped", "confirmations", "tallies",
-         "blocked_by_rival"]
+STATS = ["gate_pass", "gate_block", "store_insert", "store_merge", "promoted", "evicted", "dropped",
+         "confirmations", "confirm_blocked", "tallies", "blocked_by_rival"]
 
 
 def summarize(runs, T):
