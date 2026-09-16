@@ -163,3 +163,88 @@ with heavy eviction (v1 evicts 4656, surprise-gated 1596) while no SLS policy
 ever fills. Part of the reported gap is that SLS stores less, not only that it
 stores better. The `pressure` experiment re-runs the ablation set at `cap = 60`
 so the comparison can be made at equal pressure.
+
+## 5. The runs were paired all along and were reported as independent
+
+Under a given seed every policy sees the same pre-drawn event stream, and
+`pool.map` preserves job order, so entry *i* of each policy's list is the same
+seed. The summaries nevertheless reported unpaired intervals, which carry the
+between-seed variance that the design already removes.
+
+Pairing changes what the ablation table can say. `sls_no_reconsolidation` reads
+0.083 +- 0.026 against 0.059 +- 0.021 unpaired — overlapping, inconclusive — and
+`asr +0.0244 +- 0.0134` paired, which is significant. It also makes the vacuous
+ablations unmistakable: `sls_no_payoff`, `sls_fifo_eviction` and
+`sls_bounded_gate` come out at exactly `+-0.0000` on every metric, zero variance,
+because they are bit-identical to `sls_full` at these settings.
+
+`paired.diffs[exp][scenario][policy][metric]` in the results file holds the mean
+difference and its 95% half-width against `PAIRED_REF`.
+
+## 8. Farming saturates, sybil injection does not
+
+Consolidation counts each source once, so an adversary holding *n* identities of
+credibility chi can never push a false template past `n * chi` support, however
+long it keeps injecting. Any quorum above that ceiling blocks the farm outright,
+at a latency cost that grows only linearly in the ceiling. A sybil adversary with
+free identities has no ceiling at all, which is why the two attacks need
+different defences — and why the track-record requirement in section 3 helps
+against one and hurts against the other.
+
+The simulation already showed the ceiling without naming it: the farm holds
+`FARM_IDS = 5` identities that reach credibility about 0.767, so its support
+saturates near 3.8, and at k = 6 farmed attack success is 0.009. `farm_study()`
+now states the ceiling, the quorum that blocks it and the honest latency that
+quorum costs.
+
+## 9. Scale the quorum by rival support, not by log-odds
+
+The published conflict scaling raises the quorum by the log-odds gap between the
+demonstrated template and the model's current top choice. Replacing it with a
+margin over the best rival — `k_eff = quorum + gamma * rival_support` — asks for
+the thing conformist transmission is actually about: more support than the
+competition, by a margin, rather than a bare majority.
+
+| policy | acc | drift | ASR S2 | paired acc vs `sls_full` |
+|:--|--:|--:|--:|:--|
+| `sls_full` | 0.996 | 0.958 | 0.059 | — |
+| `sls_adaptive_quorum` (published) | 0.992 | 0.910 | 0.071 | **-0.0041 +- 0.0019** |
+| `sls_margin_quorum` | **0.998** | **0.978** | 0.076 | **+0.0021 +- 0.0010** |
+
+The margin rule is significantly better than `sls_full` on accuracy and reaches
+0.978 on drifted situations against 0.958, with no significant attack-success
+cost (`+0.0169 +- 0.0191`, CI includes 0). The published conflict-scaled policy
+is significantly *worse* than `sls_full` on accuracy and reaches only 0.910 on
+drifted situations. If one of the two adaptive rules is to appear in the paper,
+it should be this one.
+
+## What the paper should change
+
+| # | Finding | Action |
+|:--|:--|:--|
+| 1 | Payoff and prestige do nothing at encoding; fixing that makes the attack easier | Reword: surprise gates encoding, payoff and prestige govern consolidation. Do not change the code. |
+| 2 | Confirmations bypass the gate, quorum and rival test | Close it as hardening; do not claim an attack-success benefit, there is none at these settings. |
+| 3 | A track record gives sybil immunity and helps the farm | New result worth stating: a distinct-identity quorum is only as strong as the cost of an identity. |
+| 4 | The sweep ran at 5.97 observations per window against a theory checked at 20 | Re-run the headline sweep at the theory's density. The mechanism looks far better there. |
+| 5 | Runs are paired; intervals were unpaired | Report paired differences. Several ablations become significant. |
+| 6 | `acc_unknown` pinned at 1.0000 for 15 of 21 policies | Report the ablation set under capacity pressure as well. |
+| 7 | Eviction never fires at cap 150 | Either drop `sls_fifo_eviction` or run it at a cap that fills. Under pressure it is the largest effect in the table. |
+| 8 | Farm support saturates at `n * chi` | State the ceiling; it is a clean result the current theory section omits. |
+| 9 | Conflict-scaled quorum is worse than the fixed quorum | Replace it with the rival-support margin. |
+
+Two further caveats found along the way, neither in the original list:
+
+- The three baselines all run saturated at `mem` 150 with heavy eviction while no
+  SLS policy ever fills, so part of the reported gap in Table 3 is that SLS
+  stores less, not only that it stores better.
+- `support()` reads credibility at query time, so a farm that earns reputation
+  with forged outcomes retroactively raises the weight of injections it made
+  earlier. If that is intended it should be said; if not, credibility should be
+  captured when the observation is recorded.
+
+## Reproducing
+
+    python3 sls_retention_sim.py --seeds 20 --out runs/after.json
+    python3 make_figures.py runs/after.json figures
+
+All four published figures regenerate byte-identical from this branch.
