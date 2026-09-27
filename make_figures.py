@@ -350,11 +350,22 @@ def fig5(res, path, scen="sybil_forged"):
 
 
 def find_chrome():
-    """Browser for PNG export: $CHROME, then Google Chrome on macOS, then Chrome or Chromium on PATH."""
+    """Browser for PNG export: $CHROME, then Google Chrome on macOS (the default location, then
+    wherever Spotlight finds it, e.g. an external volume), then Chrome or Chromium on PATH."""
     if os.environ.get("CHROME"):
         return os.environ["CHROME"]
     if Path(MAC_CHROME).exists():
         return MAC_CHROME
+    if shutil.which("mdfind"):
+        try:
+            hits = subprocess.run(["mdfind", "kMDItemCFBundleIdentifier == 'com.google.Chrome'"],
+                                  capture_output=True, text=True, timeout=10).stdout.split("\n")
+        except (OSError, subprocess.SubprocessError):
+            hits = []
+        for app in filter(None, hits):
+            binary = Path(app) / "Contents" / "MacOS" / "Google Chrome"
+            if binary.exists():
+                return str(binary)
     names = ["google-chrome", "google-chrome-stable", "chromium", "chromium-browser"]
     return next(filter(None, map(shutil.which, names)), None)
 

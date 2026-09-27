@@ -31,7 +31,7 @@ The paper proves that raising the quorum lowers the risk of consolidating a coor
 | `results/results.json` | The full run reported in the paper (20 seeds), with the quorum and adversarial-share sweeps and the numerical checks of Propositions 1 and 2. |
 | `results/results_v0_absolute_quorum.json` | An earlier lifecycle that failed against forged outcomes, kept for transparency (see below). |
 | `results/results_review_branch.json` | The k = 1 run, with the quorum sweep at both observation densities, the ablation set under capacity pressure and paired differences. |
-| `figures/` | Figures 1 to 5 as SVG, and 1 to 4 as PNG. |
+| `figures/` | Figures 1 to 5 as SVG and PNG. |
 
 ## Running the code
 
@@ -54,7 +54,7 @@ The full run took about 100 seconds with 8 worker processes on an 8-core Apple s
 
 `results/results.json` was produced with Python 3.14.7 and NumPy 2.5.3 on macOS (arm64). Reruns with other NumPy or BLAS builds may differ slightly from the reported values.
 
-`make_figures.py` looks for a browser in the `CHROME` environment variable, then at the default Google Chrome location on macOS, then for `google-chrome`, `google-chrome-stable`, `chromium` or `chromium-browser` on `PATH`. If it finds none, it writes the SVG files and skips the PNG export.
+`make_figures.py` looks for a browser in the `CHROME` environment variable, then at the default Google Chrome location on macOS, then wherever Spotlight finds Google Chrome (for example on an external volume), then for `google-chrome`, `google-chrome-stable`, `chromium` or `chromium-browser` on `PATH`. If it finds none, it writes the SVG files and skips the PNG export.
 
 ```bash
 CHROME=/usr/bin/chromium python3 make_figures.py results/results.json figures
