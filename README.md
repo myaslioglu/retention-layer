@@ -12,11 +12,11 @@ Version 1 of the paper, posted in January 2025, is [arXiv:2501.09166](https://ar
 
 Most of what a deployed model could keep is produced by other agents: users, documents, tools and other models. The revision treats the question of what to retain as a social learning problem and derives the memory lifecycle from social learning strategies.
 
-- Encoding is gated by surprise (copy when uncertain), by observed outcomes (payoff bias) and by the credibility that sources earn through past success (prestige bias).
+- Encoding is gated by surprise: copy when uncertain. Observed outcomes (payoff bias) and the credibility that sources earn through past success (prestige bias) govern consolidation rather than encoding. They decide which buffered candidates become durable, not which observations are admitted, and the code measures this: of the observations that reach the encoding gate, every one passes it, and the gate agrees with a bare surprise test on all of them.
 - Consolidation follows conformist transmission. A behaviour becomes durable only when the credibility-weighted support of distinct, recent sources reaches a quorum and exceeds the support for every rival behaviour, including the one the model already produces.
 - Reconsolidation strengthens or weakens stored entries according to the outcomes of reproducing them, and entries that go unused decay.
 
-The paper proves that raising the quorum lowers the risk of consolidating a coordinated false template exponentially while delaying true templates only linearly. It also shows that relative consolidation protects only while credible honest evidence arrives faster than adversarial evidence.
+The paper proves that raising the quorum lowers the risk of consolidating a coordinated false template exponentially while delaying true templates only linearly. Both quantities count evidence arriving inside one recency window, so the separation is only visible when the window carries enough observations: see *Quorum and observation density* below. It also shows that relative consolidation protects only while credible honest evidence arrives faster than adversarial evidence.
 
 ## What the simulation is and is not
 
@@ -30,7 +30,8 @@ The paper proves that raising the quorum lowers the risk of consolidating a coor
 | `make_figures.py` | Draws Figures 1 to 4 as SVG from a results file and exports PNG with headless Chrome or Chromium. |
 | `results/results.json` | The full run reported in the paper (20 seeds), with the quorum and adversarial-share sweeps and the numerical checks of Propositions 1 and 2. |
 | `results/results_v0_absolute_quorum.json` | An earlier lifecycle that failed against forged outcomes, kept for transparency (see below). |
-| `figures/` | Figures 1 to 4 as SVG and PNG. |
+| `results/results_review_branch.json` | The k = 1 run, with the quorum sweep at both observation densities, the ablation set under capacity pressure and paired differences. |
+| `figures/` | Figures 1 to 5 as SVG and PNG. |
 
 ## Running the code
 
@@ -53,7 +54,7 @@ The full run took about 100 seconds with 8 worker processes on an 8-core Apple s
 
 `results/results.json` was produced with Python 3.14.7 and NumPy 2.5.3 on macOS (arm64). Reruns with other NumPy or BLAS builds may differ slightly from the reported values.
 
-`make_figures.py` looks for a browser in the `CHROME` environment variable, then at the default Google Chrome location on macOS, then for `google-chrome`, `google-chrome-stable`, `chromium` or `chromium-browser` on `PATH`. If it finds none, it writes the SVG files and skips the PNG export.
+`make_figures.py` looks for a browser in the `CHROME` environment variable, then at the default Google Chrome location on macOS, then wherever Spotlight finds Google Chrome (for example on an external volume), then for `google-chrome`, `google-chrome-stable`, `chromium` or `chromium-browser` on `PATH`. If it finds none, it writes the SVG files and skips the PNG export.
 
 ```bash
 CHROME=/usr/bin/chromium python3 make_figures.py results/results.json figures
@@ -68,12 +69,42 @@ Final means over 20 seeds when 30% of the observations about each target situati
 | First version (ungated) | 0.633 | 0.415 | 0.141 | 0.141 |
 | Surprise-gated | 0.843 | 0.700 | 0.181 | 0.181 |
 | Trust-gated | 0.794 | 0.019 | 0.015 | 0.064 |
-| SLS, fixed quorum | 0.996 | 0.958 | 0.059 | 0.066 |
+| SLS, fixed quorum | 0.999 | 0.989 | 0.059 | 0.042 |
+| SLS, rival-margin quorum | 0.998 | 0.978 | 0.076 | 0.074 |
 | SLS, conflict-scaled quorum | 0.992 | 0.910 | 0.071 | 0.075 |
+
+The headline quorum is k = 1, set by `--headline-quorum` and applied to every policy that does not
+name its own. It dominates the k = 2 used in the first draft of this table on every column: 0.996,
+0.958, 0.059 and 0.066 respectively. `results/results.json` was produced at k = 2 and reproduces
+exactly with `--headline-quorum 2`; `results/results_review_branch.json` is the k = 1 run.
+
+The rival-margin rule raises the quorum by the windowed support of the best rival template rather
+than by the log-odds gap to the model's current top choice, so consolidation needs a margin over the
+competition rather than a bare majority. Paired against the fixed quorum it is significantly better
+on accuracy than the conflict-scaled rule and reaches 0.978 on drifted situations against 0.910,
+with no significant difference in attack success.
 
 The trust-gated policy matches or beats SLS on attack success, but it fails on drifted situations (0.019) because it keeps reinforcing the old behaviour. Conformity also works against the SLS lifecycle once the adversary is faster. At an adversarial share of 0.7 in S2, attack success for SLS with a fixed quorum is 0.744, against 0.354 for the first version (Figure 4).
 
 ![Attack success as the adversarial share of observations varies](figures/fig4_majority.png)
+
+## Quorum and observation density
+
+A quorum is an absolute credibility count, but what it can ever reach is set by how many observations
+about one situation fall inside a recency window:
+
+    obs_per_window = (1 - p_interact) * WINDOW / n_sit
+
+This does not depend on the run length. At the settings above it is 5.97, while `quorum_study` checks
+Proposition 2 at N = 20. At k = 6 the rule needs eight distinct honest sources inside a window that
+delivers about three, so the store starves rather than filters: memory falls from 150 entries to 48 and
+accuracy to 0.654, and the low attack success at that quorum is bought by forgetting everything.
+
+`sls_retention_sim.py` therefore runs the quorum sweep twice, at 5.97 and at 20.0 observations per
+window, with the quorums scaled by the same factor so both sweeps span one range of relative quorum.
+Attack success is flat in the quorum at the lower density and falls monotonically at the higher one,
+where k = 2 holds drift accuracy at 1.000 while attack success is 0.010 under S2 and 0.000 under S3.
+Read the quorum in units of `obs_per_window`, which the results file records.
 
 ## The earlier lifecycle
 

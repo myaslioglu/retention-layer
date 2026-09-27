@@ -16,6 +16,8 @@ import time
 import sys
 from pathlib import Path
 
+from sls_retention_sim import binom_tail   # single source of truth
+
 INK, INK2, MUTED, GRID, AXIS, SURF = "#0b0b0b", "#52514e", "#898781", "#e1e0d9", "#c3c2b7", "#ffffff"
 SERIES = ["#2a78d6", "#eb6834", "#1baf7a", "#eda100"]      # categorical slots 1-4, fixed order
 RAMP = ["#86b6ef", "#3987e5", "#1c5cab", "#0d366b"]        # ordinal blue ramp for rho
@@ -192,14 +194,6 @@ def fig1(path):
 # ---------------------------------------------------------------------------
 # Figure 2: quorum trade-off (Proposition 2)
 # ---------------------------------------------------------------------------
-def binom_tail(n, p, k):
-    if k <= 0:
-        return 1.0
-    if k > n:
-        return 0.0
-    return sum(math.comb(n, j) * p ** j * (1 - p) ** (n - j) for j in range(k, n + 1))
-
-
 def fig2(res, path):
     qt = res["quorum_theory"]
     N, q, ca, ch = qt["N"], qt["q"], qt["chi_adv"], qt["chi_hon"]
@@ -281,9 +275,14 @@ def fig4(res, path, policies):
     rhos = [0.1, 0.3, 0.5, 0.7]
     panels = [("sybil_forged", "(a) S2: fresh identities, forged outcomes", 100),
               ("farmed_forged", "(b) S3: reputable identities, forged outcomes", 600)]
+    # One shared y range wide enough for every error bar; a fixed 0.8 top clipped them silently.
+    top = max(m + h for scen, _, _ in panels for pol in policies for rho in rhos
+              for m, h in [rho_sum[f"{scen}_rho{rho:g}"][pol]["asr"]["final"]])
+    ymax = min(1.0, max(0.8, math.ceil(top / 0.2 - 1e-9) * 0.2))
+    yticks = [round(0.2 * i, 1) for i in range(int(round(ymax / 0.2)) + 1)]
     for idx, (scen, title, px) in enumerate(panels):
-        P = Panel(s, px, 100, 350, 260, (0.0, 0.8), (0, 0.8), cid=f"q{idx}")
-        P.axes(rhos, [0, 0.2, 0.4, 0.6, 0.8], lambda v: f"{v:g}", pct,
+        P = Panel(s, px, 100, 350, 260, (0.0, 0.8), (0, ymax), cid=f"q{idx}")
+        P.axes(rhos, yticks, lambda v: f"{v:g}", pct,
                "Adversarial share of observations, ρ", "Attack success rate", title)
         for j, (c, p) in enumerate(zip(SERIES, policies)):
             off = (j - 1.5) * 0.012
@@ -291,7 +290,7 @@ def fig4(res, path, policies):
             for rho in rhos:
                 m, h = rho_sum[f"{scen}_rho{rho:g}"][p]["asr"]["final"]
                 X = P.X(rho + off)
-                s.line(X, P.Y(max(m - h, 0.0)), X, P.Y(min(m + h, 0.8)), c, 1.4)
+                s.line(X, P.Y(max(m - h, 0.0)), X, P.Y(min(m + h, ymax)), c, 1.4)
                 pts.append((X, P.Y(m)))
             s.polyline(pts, c, 2.0, clip=f"q{idx}")
             for X, Y in pts:
@@ -299,12 +298,74 @@ def fig4(res, path, policies):
     s.save(path)
 
 
+def fig5(res, path, scen="sybil_forged"):
+    """Attack success and drift accuracy against relative quorum, at two observation densities.
+
+    A quorum is an absolute credibility count, but what it can reach is bounded by how many
+    observations about one situation fall inside a recency window. The published settings give
+    5.97 while Proposition 2 is checked at 20, so the sweep never entered the regime the
+    proposition describes.
+    """
+    if "quorum_dense" not in res["summary"]:
+        return False
+    cfg = res["config"]
+    runs = [(res["summary"]["quorum"][scen], cfg["obs_per_window"], SERIES[0], "published"),
+            (res["summary"]["quorum_dense"][scen], cfg["obs_per_window_dense"], SERIES[1], "theory density")]
+    ks = sorted({float(n[5:]) for n in runs[0][0] if n.startswith("sls_q")})
+
+    s = Svg(1000, 470)
+    x = 60
+    for _, dens, c, tag in runs:
+        lab = f"{dens:.1f} observations per situation per window ({tag})"
+        s.line(x, 27, x + 26, 27, c, 3)
+        s.text(x + 32, 32, lab, 15, INK2)
+        x += 32 + 8.3 * len(lab) + 26
+
+    panels = [("asr", "Attack success rate", "(a) False template reproduced", 100),
+              ("acc_drifted", "Accuracy, drifted situations", "(b) Cost paid on the true templates", 600)]
+    for idx, (metric, ylabel, title, px) in enumerate(panels):
+        top = max(m + h for sm, _, _, _ in runs for k in ks
+                  for m, h in [sm[f"sls_q{k:g}"][metric]["final"]])
+        ymax = min(1.0, math.ceil(top / 0.05 - 1e-9) * 0.05)
+        step = 0.2 if ymax > 0.4 else (0.05 if ymax <= 0.2 else 0.1)
+        yticks = [round(step * i, 2) for i in range(int(round(ymax / step)) + 1)]
+        P = Panel(s, px, 100, 350, 260, (-0.2, max(ks) + 0.2), (0, ymax), cid=f"d{idx}")
+        P.axes(ks, yticks, lambda v: f"{v:g}", pct,
+               "Quorum k, in credibility units", ylabel, title)
+        for j, (sm, _, c, _) in enumerate(runs):
+            off = (j - 0.5) * 0.06
+            pts = []
+            for k in ks:
+                m, h = sm[f"sls_q{k:g}"][metric]["final"]
+                X = P.X(k + off)
+                s.line(X, P.Y(max(m - h, 0.0)), X, P.Y(min(m + h, ymax)), c, 1.4)
+                pts.append((X, P.Y(m)))
+            s.polyline(pts, c, 2.2, clip=f"d{idx}")
+            for X, Y in pts:
+                s.dot(X, Y, c, 4.5)
+    s.text(100, 440, "Same relative quorum on both curves: the dense run scales k by the ratio of the "
+                     "two densities. Bars are 95% intervals over 20 seeds.", 14, MUTED)
+    s.save(path)
+    return True
+
+
 def find_chrome():
-    """Browser for PNG export: $CHROME, then Google Chrome on macOS, then Chrome or Chromium on PATH."""
+    """Browser for PNG export: $CHROME, then Google Chrome on macOS (the default location, then
+    wherever Spotlight finds it, e.g. an external volume), then Chrome or Chromium on PATH."""
     if os.environ.get("CHROME"):
         return os.environ["CHROME"]
     if Path(MAC_CHROME).exists():
         return MAC_CHROME
+    if shutil.which("mdfind"):
+        try:
+            hits = subprocess.run(["mdfind", "kMDItemCFBundleIdentifier == 'com.google.Chrome'"],
+                                  capture_output=True, text=True, timeout=10).stdout.split("\n")
+        except (OSError, subprocess.SubprocessError):
+            hits = []
+        for app in filter(None, hits):
+            binary = Path(app) / "Contents" / "MacOS" / "Google Chrome"
+            if binary.exists():
+                return str(binary)
     names = ["google-chrome", "google-chrome-stable", "chromium", "chromium-browser"]
     return next(filter(None, map(shutil.which, names)), None)
 
@@ -360,6 +421,8 @@ def main():
     fig4(res, out / "fig4_majority.svg", POLICIES)
     sizes = {"fig1_architecture": (1000, 600), "fig2_quorum": (1000, 480), "fig3_dynamics": (1000, 760),
              "fig4_majority": (1000, 470)}
+    if fig5(res, out / "fig5_density.svg"):
+        sizes["fig5_density"] = (1000, 470)
     chrome = find_chrome()
     if chrome is None:
         print("SVG files written; PNG export skipped because Chrome or Chromium was not found (set CHROME).")
