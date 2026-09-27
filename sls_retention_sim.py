@@ -71,6 +71,7 @@ class Policy:
     use_buffer: bool = True         # two tiers: episodic buffer -> retention store
     quorum: float = 2.0             # credibility-weighted support needed for consolidation (0 = immediate)
     quorum_gamma: float = 0.0       # conflict scaling of the quorum: k = quorum + gamma * conflict
+    quorum_scale: str = "logodds"   # "logodds": dispreference of tpl | "rival": windowed rival support
     use_cred: bool = True
     use_payoff: bool = True
     reconsolidate: bool = True
@@ -80,6 +81,12 @@ class Policy:
     decay: bool = True
     confirm: bool = True            # record support for stored templates and for the model's current behaviour
     relative: bool = True           # consolidate only when support exceeds every rival template's support
+    gate_first: bool = False        # run the encoding gate before the tally short-circuit
+    bounded_surprise: bool = False  # saturate the surprise term so payoff and prestige stay commensurate
+    confirm_gate: bool = False      # a confirmation may strengthen a stored entry only from a credible source
+    confirm_min_history: int = 1    # ... or only from a source that already has a track record
+    quorum_min_history: int = 1     # observations a source must have made before it counts toward a quorum
+    cred_frozen: bool = False       # weigh support by credibility when recorded, not when read
     cap: int = 150
     buf_cap: int = 400
 
@@ -213,8 +220,10 @@ class RetentionMemory:
         self.bPay = np.zeros(B)
         self.bPayN = np.zeros(B)
         self.rep = {}
+        self.seen = {}                               # per source: how many observations it has made so far
         self.stats = dict(obs=0, gate_pass=0, buf_insert=0, store_insert=0, store_merge=0,
-                          evicted=0, dropped=0, promoted=0, confirmations=0, tallies=0, blocked_by_rival=0)
+                          evicted=0, dropped=0, promoted=0, confirmations=0, tallies=0, blocked_by_rival=0,
+                          confirm_blocked=0, gate_block=0)
 
     # -- credibility (prestige earned by success) --------------------------
     def _rep(self, src):
@@ -232,9 +241,25 @@ class RetentionMemory:
     def rep_add(self, src, positive, amount):
         self._rep(src)[0 if positive else 1] += amount
 
+    def chi_of(self, src, rec):
+        """Credibility of a recorded support entry: current by default, as recorded if frozen."""
+        return rec[1] if self.p.cred_frozen else self.cred(src)
+
     def support(self, sup, t):
-        """Credibility-weighted count of distinct sources seen within the recency window."""
-        return sum(self.cred(s) for s, ts in sup.items() if t - ts <= WINDOW) if sup else 0.0
+        """Credibility-weighted count of distinct sources seen within the recency window.
+
+        With quorum_min_history > 1 a source must already have a track record to count, which
+        denies a one-shot identity any weight. Honest newcomers are one-shot here too, so this
+        trades honest evidence for sybil resistance rather than separating the two for free.
+
+        Credibility is read at query time unless cred_frozen is set, so a farm that earns
+        reputation with forged outcomes retroactively raises the weight of earlier injections.
+        """
+        if not sup:
+            return 0.0
+        h = self.p.quorum_min_history
+        return sum(self.chi_of(s, rec) for s, rec in sup.items()
+                   if t - rec[0] <= WINDOW and (h <= 1 or self.seen.get(s, 0) >= h))
 
     # -- read ----------------------------------------------------------------
     def _attend(self, X):
@@ -256,14 +281,30 @@ class RetentionMemory:
         return base + LAMBDA * (R @ self.w.E.T), att
 
     # -- write path ------------------------------------------------------------
+    def gate_ok(self, surprise, pay, chi):
+        """SLS encoding gate: surprise (copy when uncertain), payoff bias, prestige bias.
+
+        The published form is linear in an unbounded surprise excess, so once the tally branch
+        has removed everything with surprise <= S0 the first term alone decides every case and
+        the other two are inert. The bounded form saturates it and keeps the three commensurate.
+        """
+        p = self.p
+        if p.gate == "surprise":
+            return surprise > S0
+        if p.gate == "trust":
+            return chi >= CHI_MIN
+        s_term = math.tanh(surprise / S0 - 1.0) if p.bounded_surprise else (surprise - S0)
+        return TH_S * s_term + TH_P * (pay - 0.5) + TH_C * (chi - 0.5) > 0
+
     def observe(self, c, x, tpl, src, y, t):
         p, st = self.p, self.stats
         st["obs"] += 1
+        self.seen[src] = self.seen.get(src, 0) + 1
         if y != 0:                                   # vicarious outcome -> demonstrator reputation
             self.rep_add(src, y > 0, 1.0)
         if p.gate == "none":                         # v1: append everything
             st["gate_pass"] += 1
-            self.store(x, tpl, {src: t}, 1.0, t, merge=False)
+            self.store(x, tpl, {src: (t, self.cred(src))}, 1.0, t, merge=False)
             return
         if p.confirm and self.m:
             sims = self.K[:self.m] @ x
@@ -272,32 +313,32 @@ class RetentionMemory:
                 i = int(match[np.argmax(sims[match])])
                 if y < 0:
                     self.S[i] *= math.exp(-ETA)      # observed failure weakens the template
+                elif (p.confirm_gate and self.cred(src) < CHI_MIN) or self.seen.get(src, 0) < p.confirm_min_history:
+                    st["confirm_blocked"] += 1       # this path bypasses the gate, quorum and rival test
                 else:
                     if src not in self.sup[i]:
                         self.S[i] += self.cred(src)  # a new independent source adds its credibility
-                    self.sup[i][src] = t
+                    self.sup[i][src] = (t, self.cred(src))
                 st["confirmations"] += 1
                 return
         sc, _ = self.scores(np.array([c]), x[None, :])
         surprise = -log_softmax(sc[0])[tpl]
+        chi = self.cred(src)
+        pay = 0.5 if (y == 0 or not p.use_payoff) else (1.0 if y > 0 else 0.0)
+        if p.gate_first and not self.gate_ok(surprise, pay, chi):
+            st["gate_block"] += 1                    # gate the tally too, not just the encoding
+            return
         if p.confirm and surprise <= S0:             # the model already behaves this way: tally the support
             if p.relative:
                 self.buffer_add(c, x, tpl, src, y, t, tally=True)
             st["tallies"] += 1
             return
-        chi = self.cred(src)
-        pay = 0.5 if (y == 0 or not p.use_payoff) else (1.0 if y > 0 else 0.0)
-        if p.gate == "surprise":
-            ok = surprise > S0
-        elif p.gate == "trust":
-            ok = chi >= CHI_MIN
-        else:
-            ok = TH_S * (surprise - S0) + TH_P * (pay - 0.5) + TH_C * (chi - 0.5) > 0
-        if not ok:
+        if not p.gate_first and not self.gate_ok(surprise, pay, chi):
+            st["gate_block"] += 1
             return
         st["gate_pass"] += 1
         if not p.use_buffer:
-            self.store(x, tpl, {src: t}, chi if p.gate == "trust" else 1.0, t)
+            self.store(x, tpl, {src: (t, chi)}, chi if p.gate == "trust" else 1.0, t)
             return
         i = self.buffer_add(c, x, tpl, src, y, t)
         self.try_promote(i, t)
@@ -328,7 +369,7 @@ class RetentionMemory:
                 self.bTally[idx] = False             # a surprising observation makes the entry a candidate
         self.bN[idx] += 1
         self.bT[idx] = t
-        self.bSup[idx][src] = t
+        self.bSup[idx][src] = (t, self.cred(src))
         if y != 0 and self.p.use_payoff:
             self.bPay[idx] += 1.0 if y > 0 else 0.0
             self.bPayN[idx] += 1.0
@@ -355,16 +396,18 @@ class RetentionMemory:
     def try_promote(self, i, t):
         if self.bTally[i]:
             return
-        sup = self.bSup[i]
+        p, sup = self.p, self.bSup[i]
         q = self.support(sup, t)
-        k_eff = self.p.quorum
-        if self.p.quorum_gamma > 0:
-            k_eff += self.p.quorum_gamma * self.conflict(int(self.bC[i]), self.bK[i], int(self.bV[i]))
+        rival = self.rival_support(i, t) if (p.relative or p.quorum_scale == "rival") else 0.0
+        k_eff = p.quorum
+        if p.quorum_gamma > 0:
+            k_eff += p.quorum_gamma * (rival if p.quorum_scale == "rival"
+                                       else self.conflict(int(self.bC[i]), self.bK[i], int(self.bV[i])))
         if q + 1e-9 < k_eff:
             return
-        if self.p.use_payoff and self.bPayN[i] > 0 and self.bPay[i] / self.bPayN[i] < 0.5:
+        if p.use_payoff and self.bPayN[i] > 0 and self.bPay[i] / self.bPayN[i] < 0.5:
             return
-        if self.p.relative and q <= self.rival_support(i, t):
+        if p.relative and q <= rival:
             self.stats["blocked_by_rival"] += 1
             return
         self.store(self.bK[i].copy(), int(self.bV[i]), dict(sup), max(q, 1e-3), t, distinct=True)
@@ -380,12 +423,15 @@ class RetentionMemory:
             if cand.size:
                 i = int(cand[np.argmax(sims[cand])])
                 if distinct:                         # each source counts once
-                    self.S[i] += sum(self.cred(s) for s in sup if s not in self.sup[i])
+                    self.S[i] += sum(self.chi_of(src, rec) for src, rec in sup.items()
+                                     if src not in self.sup[i])
                 else:
                     self.S[i] += s0
                 self.K[i] = unit(self.K[i] + 0.5 * x)
-                for s, ts in sup.items():
-                    self.sup[i][s] = max(ts, self.sup[i].get(s, ts))
+                for src, rec in sup.items():
+                    prev = self.sup[i].get(src)
+                    if prev is None or rec[0] > prev[0]:
+                        self.sup[i][src] = rec
                 self.stats["store_merge"] += 1
                 return
         if m < p.cap:
@@ -468,23 +514,54 @@ def run_policy(world, pol):
 # ---------------------------------------------------------------------------
 # Experiment definitions
 # ---------------------------------------------------------------------------
-def main_policies():
+def obs_per_window(env):
+    """Observations about one situation that fall inside a recency window.
+
+    Independent of T: (1 - p_interact) * WINDOW / n_sit. At the published settings this is
+    5.97, while quorum_study checks Proposition 2 at N = 20, so the simulation never enters
+    the regime the proposition describes. DENSE_ENV rescales n_sit to close that gap.
+    """
+    return (1.0 - env.p_interact) * WINDOW / env.n_sit
+
+
+DENSE_ENV = dict(n_sit=60, n_targets=6)      # obs_per_window = 20.0, the density quorum_study assumes
+DENSE_SCALE = 20.0 / 6.0                     # so a quorum k compares to k * DENSE_SCALE at that density
+
+
+def main_policies(q=1.0):
+    """Policies of the main table. q is the headline quorum; policies that name one keep it."""
+    def P(name, **kw):
+        return Policy(name, quorum=kw.pop("quorum", q), **kw)
+
     return [
         Policy("v1_ungated", gate="none", use_buffer=False, quorum=0.0, use_cred=False, use_payoff=False,
                reconsolidate=False, null_slot=False, strength_prior=False, eviction="fifo", decay=False,
                confirm=False, relative=False),
-        Policy("surprise_gated", gate="surprise", use_buffer=False, confirm=False, relative=False),
-        Policy("trust_gated", gate="trust", use_buffer=False, confirm=False, relative=False),
-        Policy("sls_full"),
-        Policy("sls_adaptive_quorum", quorum=1.0, quorum_gamma=0.25),
-        Policy("sls_no_quorum", quorum=0.0),
-        Policy("sls_no_relative", relative=False),
-        Policy("sls_no_confirmation", confirm=False, relative=False),
-        Policy("sls_no_credibility", use_cred=False),
-        Policy("sls_no_payoff", use_payoff=False),
-        Policy("sls_no_reconsolidation", reconsolidate=False),
-        Policy("sls_fifo_eviction", eviction="fifo"),
-        Policy("sls_no_null_slot", null_slot=False),
+        P("surprise_gated", gate="surprise", use_buffer=False, confirm=False, relative=False),
+        P("trust_gated", gate="trust", use_buffer=False, confirm=False, relative=False),
+        P("sls_full"),
+        P("sls_adaptive_quorum", quorum=1.0, quorum_gamma=0.25),
+        P("sls_no_quorum", quorum=0.0),
+        P("sls_no_relative", relative=False),
+        P("sls_no_confirmation", confirm=False, relative=False),
+        P("sls_no_credibility", use_cred=False),
+        P("sls_no_payoff", use_payoff=False),
+        P("sls_no_reconsolidation", reconsolidate=False),
+        P("sls_fifo_eviction", eviction="fifo"),
+        P("sls_no_null_slot", null_slot=False),
+        # Fixes from the code review, each isolated so its effect is paired against sls_full.
+        P("sls_gate_first", gate_first=True),
+        P("sls_bounded_gate", bounded_surprise=True),
+        P("sls_gate_fixed", gate_first=True, bounded_surprise=True),
+        P("sls_confirm_gate", confirm_gate=True),
+        P("sls_confirm_hist2", confirm_min_history=2),
+        P("sls_quorum_hist2", quorum_min_history=2),
+        P("sls_v3", gate_first=True, bounded_surprise=True, confirm_gate=True, quorum_min_history=2),
+        P("sls_history", confirm_min_history=2, quorum_min_history=2),
+        P("sls_cap60", cap=60),                          # store fills, so eviction is exercised
+        P("sls_cap60_fifo", cap=60, eviction="fifo"),    # ... and the eviction rule matters
+        P("sls_margin_quorum", quorum=1.0, quorum_gamma=1.0, quorum_scale="rival"),
+        P("sls_cred_frozen", cred_frozen=True),
     ]
 
 
@@ -502,25 +579,64 @@ def job(args):
     return exp, scen, seed, {p.name: run_policy(world, p) for p in pols}
 
 
+# Two-sided 95% Student-t critical values, df 1..30; Cornish-Fisher expansion beyond.
+_T95 = {1: 12.706, 2: 4.303, 3: 3.182, 4: 2.776, 5: 2.571, 6: 2.447, 7: 2.365, 8: 2.306,
+        9: 2.262, 10: 2.228, 11: 2.201, 12: 2.179, 13: 2.160, 14: 2.145, 15: 2.131,
+        16: 2.120, 17: 2.110, 18: 2.101, 19: 2.093, 20: 2.086, 21: 2.080, 22: 2.074,
+        23: 2.069, 24: 2.064, 25: 2.060, 26: 2.056, 27: 2.052, 28: 2.048, 29: 2.045, 30: 2.042}
+
+
+def t95(df):
+    if df < 1:
+        return float("nan")
+    if df in _T95:
+        return _T95[df]
+    z = 1.959963985
+    return z + (z ** 3 + z) / (4 * df) + (5 * z ** 5 + 16 * z ** 3 + 3 * z) / (96 * df ** 2)
+
+
 def ci95(vals):
     v = np.asarray([x for x in vals if not (isinstance(x, float) and math.isnan(x))], float)
     if v.size == 0:
         return float("nan"), float("nan")
-    tcrit = {2: 12.71, 3: 4.30, 5: 2.78, 10: 2.26, 20: 2.093}.get(v.size, 1.96)
-    return float(v.mean()), (float(tcrit * v.std(ddof=1) / math.sqrt(v.size)) if v.size > 1 else 0.0)
+    if v.size == 1:
+        return float(v[0]), 0.0
+    return float(v.mean()), float(t95(v.size - 1) * v.std(ddof=1) / math.sqrt(v.size))
 
 
 METRICS = ["acc_all", "acc_known_stable", "acc_unknown", "acc_drifted", "acc_target", "asr",
            "asr_known_targets", "asr_unknown_targets"]
-STATS = ["gate_pass", "store_insert", "store_merge", "promoted", "evicted", "dropped", "confirmations", "tallies",
-         "blocked_by_rival"]
+PAIRED_REF = "sls_full"      # policy every paired difference is taken against
+STATS = ["gate_pass", "gate_block", "store_insert", "store_merge", "promoted", "evicted", "dropped",
+         "confirmations", "confirm_blocked", "tallies", "blocked_by_rival"]
+
+
+def final_by_seed(runs, kname, T):
+    """Per-seed final value of one metric, averaged over the last 1000 steps."""
+    return [np.nanmean([e[kname] for e in r["curve"] if e["t"] > T - 1000]) for r in runs]
+
+
+def paired_diff(runs_a, runs_b, kname, T):
+    """Paired mean difference a - b with a 95% CI.
+
+    Every policy sees the same event stream under a given seed, and pool.map preserves job
+    order, so entry i of each list is the same seed. Pairing removes the between-seed
+    variance that dominates the unpaired intervals.
+    """
+    d = np.asarray(final_by_seed(runs_a, kname, T), float) - np.asarray(final_by_seed(runs_b, kname, T), float)
+    d = d[~np.isnan(d)]
+    if d.size == 0:
+        return float("nan"), float("nan")
+    if d.size == 1:
+        return float(d[0]), 0.0
+    return float(d.mean()), float(t95(d.size - 1) * d.std(ddof=1) / math.sqrt(d.size))
 
 
 def summarize(runs, T):
     """runs: per-seed results for one policy -> final (t > T-1000) and time-averaged metrics with 95% CIs."""
     out = {}
     for kname in METRICS:
-        fin = [np.nanmean([e[kname] for e in r["curve"] if e["t"] > T - 1000]) for r in runs]
+        fin = final_by_seed(runs, kname, T)
         auc = [np.nanmean([e[kname] for e in r["curve"]]) for r in runs]
         out[kname] = dict(final=ci95(fin), mean_over_time=ci95(auc))
     out["online_acc"] = ci95([r["online_acc"] for r in runs])
@@ -566,10 +682,12 @@ def quorum_study(seed=0, trials=200_000, N=20, q=0.8, chi_adv=0.5, chi_hon=0.8):
             L = 300
             hc = (rng.random((4_000, L)) >= rho) & (rng.random((4_000, L)) < q)
             reach = np.cumsum(hc, axis=1) * chi_hon >= kq - 1e-9
-            lat_mc = float((reach.argmax(1) + 1).mean())
+            reached = reach.any(1)                       # rows that never reach the quorum are censored at L
+            lat_mc = float(np.where(reached, reach.argmax(1) + 1, L).mean())
             rows.append(dict(rho=rho, quorum=kq, adv_needed=ka, honest_needed=kh,
                              p_adv_exact=p_adv, p_adv_mc=p_adv_mc, chernoff_bound=chern,
-                             latency_exact=lat, latency_mc=lat_mc))
+                             latency_exact=lat, latency_mc=lat_mc,
+                             latency_mc_censored=float(1.0 - reached.mean())))
     return dict(N=N, q=q, chi_adv=chi_adv, chi_hon=chi_hon, rows=rows)
 
 
@@ -590,6 +708,25 @@ def race_study(seed=1, trials=5_000, q=0.8, chi_adv=0.5, chi_hon=0.8, L=1500):
                              p_false_ever_consolidated_relative=float(ever.mean()),
                              honest_rate_higher=bool(chi_adv * rho < chi_hon * (1 - rho) * q)))
     return dict(q=q, chi_adv=chi_adv, chi_hon=chi_hon, rows=rows)
+
+
+def farm_study(chi_farm=0.9, q=0.8, chi_hon=0.8, rho=0.3, ids=(1, 2, 5, 10, 20, 50)):
+    """Reputation farming saturates; sybil injection does not.
+
+    Consolidation counts each source once, so an adversary holding n identities of credibility
+    chi_farm can never push a false template past n * chi_farm however long it keeps injecting.
+    Any quorum above that ceiling blocks the farm outright, at a latency cost that grows only
+    linearly in the ceiling. A sybil adversary with free identities has no such ceiling, which
+    is why the two attacks need different defences.
+    """
+    rows = []
+    for n in ids:
+        ceiling = n * chi_farm
+        kh = math.ceil(ceiling / chi_hon - 1e-9) + 1        # honest sources needed to clear it
+        rows.append(dict(n_identities=n, farm_support_ceiling=ceiling,
+                         quorum_that_blocks=ceiling, honest_sources_needed=kh,
+                         honest_latency=kh / ((1 - rho) * q)))
+    return dict(chi_farm=chi_farm, q=q, chi_hon=chi_hon, rho=rho, rows=rows)
 
 
 # ---------------------------------------------------------------------------
@@ -652,6 +789,9 @@ def main():
     ap.add_argument("--workers", type=int, default=8)
     ap.add_argument("--out", default="results.json")
     ap.add_argument("--quick", action="store_true")
+    ap.add_argument("--headline-quorum", type=float, default=1.0,
+                    help="quorum of the policies that do not name one; "
+                         "pass 2 to reproduce results/results.json exactly")
     a = ap.parse_args()
     if a.quick:
         a.seeds, a.T = 2, 2000
@@ -660,12 +800,26 @@ def main():
     jobs = []
     for scen, kw in SCENARIOS.items():
         for s in range(a.seeds):
-            jobs.append(("main", scen, dict(base_env, **kw), 1000 + s, main_policies()))
-    quorum_pols = [replace(Policy("sls_full"), name=f"sls_q{kq:g}", quorum=float(kq)) for kq in [0, 1, 2, 3, 4, 6]]
+            jobs.append(("main", scen, dict(base_env, **kw), 1000 + s, main_policies(a.headline_quorum)))
+    QS = [0, 1, 2, 3, 4, 6]
+    quorum_pols = [replace(Policy("sls_full"), name=f"sls_q{kq:g}", quorum=float(kq)) for kq in QS]
+    # Same relative quorum, 3.33x the observation density: does the separation the propositions
+    # predict appear once the simulation reaches the regime they assume?
+    dense_pols = [replace(Policy("sls_full"), name=f"sls_q{kq:g}", quorum=float(kq) * DENSE_SCALE) for kq in QS]
+    dense_env = dict(base_env, **DENSE_ENV)
     for scen in ["clean", "sybil_forged", "farmed_forged"]:
         for s in range(a.seeds):
             jobs.append(("quorum", scen, dict(base_env, **SCENARIOS[scen]), 1000 + s, quorum_pols))
-    rho_pols = [p for p in main_policies() if p.name in ("v1_ungated", "trust_gated", "sls_full", "sls_adaptive_quorum")]
+            jobs.append(("quorum_dense", scen, dict(dense_env, **SCENARIOS[scen]), 1000 + s, dense_pols))
+    # Under the published cap the SLS store never fills and acc_unknown pins at exactly 1.000
+    # for 15 of 21 policies, so most ablations cannot separate. Re-run them under capacity
+    # pressure, where the metric has room to move.
+    pressure_pols = [replace(pl, cap=60) for pl in main_policies(a.headline_quorum)
+                     if pl.name.startswith("sls") and not pl.name.startswith("sls_cap")]
+    for scen in ["clean", "sybil_forged", "farmed_forged"]:
+        for s_ in range(a.seeds):
+            jobs.append(("pressure", scen, dict(base_env, **SCENARIOS[scen]), 1000 + s_, pressure_pols))
+    rho_pols = [p for p in main_policies(a.headline_quorum) if p.name in ("v1_ungated", "trust_gated", "sls_full", "sls_adaptive_quorum")]
     for scen in ["sybil_forged", "farmed_forged"]:
         for rho in [0.1, 0.3, 0.5, 0.7]:
             for s in range(a.seeds):
@@ -682,17 +836,35 @@ def main():
             grouped.setdefault(exp, {}).setdefault(scen, {}).setdefault(pname, []).append(r)
     summary = {exp: {scen: {p: summarize(runs, a.T) for p, runs in d2.items()} for scen, d2 in d1.items()}
                for exp, d1 in grouped.items()}
+    paired = {}
+    for exp, d1 in grouped.items():
+        for scen, d2 in d1.items():
+            if PAIRED_REF not in d2:
+                continue
+            for pname, runs in d2.items():
+                if pname == PAIRED_REF:
+                    continue
+                paired.setdefault(exp, {}).setdefault(scen, {})[pname] = {
+                    k: paired_diff(runs, d2[PAIRED_REF], k, a.T) for k in METRICS}
 
     out = dict(
-        config=dict(env=asdict(Env(**base_env)), seeds=a.seeds, elapsed_sec=elapsed,
+        config=dict(env=asdict(Env(**base_env)),
+                    envs={scen: asdict(Env(**dict(base_env, **kw))) for scen, kw in SCENARIOS.items()},
+                    obs_per_window=obs_per_window(Env(**base_env)),
+                    obs_per_window_dense=obs_per_window(Env(**dict(base_env, **DENSE_ENV))),
+                    dense_env=DENSE_ENV, dense_scale=DENSE_SCALE,
+                    seeds=a.seeds, elapsed_sec=elapsed,
                     constants=dict(TAU=TAU, NULL_LOGIT=NULL_LOGIT, BETA=BETA, LAMBDA=LAMBDA, DELTA_K=DELTA_K,
                                    ETA=ETA, DECAY=DECAY, S0=S0, TH_S=TH_S, TH_P=TH_P, TH_C=TH_C,
                                    CHI_MIN=CHI_MIN, CHI_UNIFORM=CHI_UNIFORM, FARM_IDS=FARM_IDS, WINDOW=WINDOW),
-                    policies=[asdict(p) for p in main_policies()], scenarios=SCENARIOS),
+                    headline_quorum=a.headline_quorum,
+                    policies=[asdict(p) for p in main_policies(a.headline_quorum)], scenarios=SCENARIOS),
         reduction_check=reduction_check(),
         quorum_theory=quorum_study(),
         race_theory=race_study(),
+        farm_theory=farm_study(),
         summary=summary,
+        paired=dict(reference=PAIRED_REF, diffs=paired),
     )
     with open(a.out, "w") as f:
         json.dump(out, f, indent=1)
@@ -707,14 +879,34 @@ def main():
             print(f"{p:24s} " + " ".join(f"{sm[k]['final'][0]:6.3f}" for k, _ in cols)
                   + f" {sm['acc_unknown']['mean_over_time'][0]:6.3f} {sm['online_acc'][0]:6.3f}"
                   + f" {sm['store_insert'][0]:5.0f} {sm['promoted'][0]:5.0f} {sm['blocked_by_rival'][0]:5.0f}")
-    for scen, d2 in summary["quorum"].items():
-        print(f"\n== quorum sweep / {scen}")
-        for p, sm in d2.items():
-            print(f"{p:10s} acc_all={sm['acc_all']['final'][0]:.3f} unkAUC={sm['acc_unknown']['mean_over_time'][0]:.3f} "
-                  f"drift={sm['acc_drifted']['final'][0]:.3f} ASR={sm['asr']['final'][0]:.3f}")
+    for exp in ["quorum", "quorum_dense"]:
+        for scen, d2 in summary[exp].items():
+            print(f"\n== {exp} sweep / {scen}  ({obs_per_window(Env(**(dict(base_env, **DENSE_ENV) if exp.endswith('dense') else base_env))):.1f} obs per situation per window)")
+            for p, sm in d2.items():
+                print(f"{p:10s} acc_all={sm['acc_all']['final'][0]:.3f} "
+                      f"unkAUC={sm['acc_unknown']['mean_over_time'][0]:.3f} "
+                      f"drift={sm['acc_drifted']['final'][0]:.3f} ASR={sm['asr']['final'][0]:.3f}")
     print("\n== rho sweep: (acc_all, ASR) final")
     for scen, d2 in summary["rho"].items():
         print(scen, {p: (round(sm["acc_all"]["final"][0], 3), round(sm["asr"]["final"][0], 3)) for p, sm in d2.items()})
+    print(f"\n== paired differences against {PAIRED_REF} (same event stream per seed); * = CI excludes 0")
+    for scen in SCENARIOS:
+        if scen not in paired.get("main", {}):
+            continue
+        print(f"-- main / {scen}")
+        print(f"{'policy':24s} " + " ".join(f"{k:>18s}" for k in ["acc_all", "acc_drifted", "asr"]))
+        for pname, dd in paired["main"][scen].items():
+            cells = []
+            for k in ["acc_all", "acc_drifted", "asr"]:
+                m, h = dd[k]
+                star = "*" if not math.isnan(h) and abs(m) > h else " "
+                cells.append(f"{m:+7.4f}+-{h:6.4f}{star}")
+            print(f"{pname:24s} " + " ".join(f"{c:>18s}" for c in cells))
+    print(f"\n== farming ceiling: a farm of n identities cannot exceed n * {out['farm_theory']['chi_farm']:g} support")
+    for r in out["farm_theory"]["rows"]:
+        print(f"  n={r['n_identities']:3d} ceiling={r['farm_support_ceiling']:5.1f} "
+              f"blocked by quorum > {r['quorum_that_blocks']:5.1f}  "
+              f"honest sources needed={r['honest_sources_needed']:3d}  latency={r['honest_latency']:6.1f}")
     print("\n== race study (Proposition 2c): P(false template first)")
     for r in out["race_theory"]["rows"]:
         print(r)
