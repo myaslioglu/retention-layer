@@ -147,3 +147,7 @@ GNU General Public License v3.0. See [LICENSE](LICENSE).
 ## Author
 
 M. Murat Yaslioglu, Istanbul University, School of Business. ORCID [0000-0003-2464-5439](https://orcid.org/0000-0003-2464-5439)
+
+## Acknowledgement
+
+Claude Code (Anthropic) assisted with parts of this repository: writing and refactoring code, running builds and tests, and preparing commits. The author of record for every commit is the repository owner. AI assistance is acknowledged here, not as a co-author.
