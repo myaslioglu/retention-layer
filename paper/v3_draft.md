@@ -158,7 +158,7 @@ Replaying the full stream (182 memories, chronological, empty gate) through the 
 
 The corrections hold where they were aimed: no sentinel was stored, rejections rose as the gate began to discriminate, and confirmations reinforced anchors instead of copying them into core. Two failure modes appeared that the calibration data did not show:
 
-- **The deployed quorum has no payoff test.** Procedural turns — approvals, *go ahead*, *send it again* — recur across days by their nature, so they meet a day-based quorum and were consolidated with importance as low as 0.18. The simulation's consolidation rejects a candidate whose outcomes are mostly negative; the deployed cluster records a payoff estimate (the mean importance of its members) but the promotion rule never reads it. This is the payoff bias of §2.1 acting where v3 says it should act — at consolidation — and its absence in the deployment is the gap. **[pending: payoff test at consolidation, decision 11 Oct]**
+- **The deployed quorum has no payoff test.** Procedural turns — approvals, *go ahead*, *send it again* — recur across days by their nature, so they meet a day-based quorum and were consolidated with importance as low as 0.18. The simulation's consolidation rejects a candidate whose outcomes are mostly negative; the deployed cluster records a payoff estimate (the mean importance of its members) but the promotion rule never reads it. This is the payoff bias of §2.1 acting where v3 says it should act — at consolidation — and its absence in the deployment was the gap. Added on 11 October: a cluster that meets the day quorum consolidates only if its mean member importance is at least 0.36. Among the 21 live clusters that met the quorum, the highest procedural or noise cluster averaged 0.35 and the lowest meaningful one 0.37, so the threshold sits in a narrow gap fitted on few clusters; individually important memories are unaffected. Five clusters already in core would not have passed it and stay there (nothing is demoted). **[pending: payoff test on traffic after 11 October]**
 - **Retrieval consolidation must be content-addressed.** One long request had been sent three times and stored as three memories with the same body; they shared one retrieval-log key, and all three were promoted. Fixed on 11 October: one promotion per content, the earliest copy.
 
 ### 3.6 Identity across representations
@@ -224,7 +224,7 @@ First run: 5 candidate clusters, 4 multi-day; 3 processed in about 25 seconds; 5
 | Old gate period for comparison | `python3 haci_cognitive/gate_report.py --since cognitive_state/gate_baseline_20260916.json` |
 | Retrieval consolidation | **first results, 11 Oct** (§4); overlap and feedback check pending |
 | Belief growth | **first results, 11 Oct** (§5); accuracy audit needs the user |
-| Payoff test at consolidation | decision pending (§3.5) |
+| Payoff test at consolidation | added 11 Oct (§3.5); effect on later traffic pending |
 | Simulation with the corrected gate position and k = 1 | `python3 sls_retention_sim.py --seeds 20` on this branch |
 
 The suggested minimum — 30 or more post-upgrade memories over at least four distinct days — was met on 11 October (111 memories, exactly four days). Because the day count is at the minimum, the day-based rules should be re-measured once traffic has spread over more days.
