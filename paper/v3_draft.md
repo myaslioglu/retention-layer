@@ -2,7 +2,7 @@
 
 **Working subtitle:** Social learning strategies for persistent memory, in simulation and in a deployed assistant
 
-*Draft started 2026-09-27. Status of every number is marked: **[sim]** simulation in this repository, **[dep]** measured on the deployed assistant, **[pending]** not yet measured. Nothing marked [pending] may be cited.*
+*Draft started 2026-09-27; held-out deployment results added 2026-10-11. Status of every number is marked: **[sim]** simulation in this repository, **[dep]** measured on the deployed assistant, **[pending]** not yet measured. Nothing marked [pending] may be cited.*
 
 ---
 
@@ -15,7 +15,8 @@ The two bodies of evidence disagree in instructive ways, and the disagreement is
 1. **Which operators transfer is set by two measurable properties of a deployment**: the size of the source population, and the number of observations about one situation that fall inside a recency window. Neither is a property of the mechanism.
 2. **The encoding gate is fragile to the scale of its surprise signal.** It admitted every observation in simulation (1439/1439) and in deployment (109/109), through different proximate causes.
 3. **Similarity is a calibration-coupled quantity.** Every threshold that compares two memories — surprise reference, cluster link, belief-cluster threshold, duplicate threshold — is defined on the scale of one similarity measure, and changing the measure silently invalidates all of them together. The simulation cannot show this, because its similarity is cosine between synthetic unit vectors.
-4. **Retrieval is denser consolidation evidence than repetition.** A conformist quorum over distinct days starves when one user produces about one memory a day. Counting the days on which a memory was *needed* — retrieved into the prompt — gives the quorum a far denser signal. This is the deployment analogue of the testing effect. **[pending: effect size]**
+4. **Retrieval is denser consolidation evidence than repetition.** A conformist quorum over distinct days starves when one user produces about one memory a day. Counting the days on which a memory was *needed* — retrieved into the prompt — gives the quorum a denser signal. This is the deployment analogue of the testing effect. On held-out traffic, 13 of 48 retrieved memories were retrieved on two or more distinct days, and retrieval accounted for 3 of 12 new core memories (§4).
+5. **Identity must be content-addressed, everywhere.** Three separate defects in the deployment came from referring to a memory by something other than a stable content key: list positions (shifted by decay), embeddings computed over a shared header, and one text normalisation in the gate against another in the store (§3.6).
 
 v3 also corrects two v2 claims that the code did not support (§2.1, §2.2).
 
@@ -142,7 +143,33 @@ Replaying the full stream (182 memories, chronological, empty gate) through the 
 | Confirmations reinforcing an anchor instead of duplicating | 0 | 25 |
 | Low-content memories refused a quorum day | — | 22 |
 
-**[pending: the corrected gate on live traffic after 27 September — `gate_report.py`]**
+**Held-out traffic, 27 September – 11 October 2026 [dep].** Every threshold above was set on data up to 27 September; this window is the first test of them on data they were not fitted to. 111 new memories, but over only **4** distinct days — traffic was bursty.
+
+| Measure | 16–27 Sep (old gate) | 27 Sep – 11 Oct (corrected gate) |
+|:--|--:|--:|
+| Memories / distinct days | 70 / 8 | 111 / 4 |
+| Decisions: confirm / pass / reject | 38 / 30 / 2 | 74 / 26 / 11 |
+| System sentinels stored | 3 | **0** |
+| Core | 9 of 70 | 12 of 111 |
+| … by quorum / importance / retrieval | — | 5 / 4 / 3 |
+| Low-content memories refused a quorum day | — | 16 |
+| Confirmations that reinforced an anchor instead of duplicating | — (they duplicated) | 25 |
+| Trust-ledger refreshes | — (not implemented) | 38 |
+
+The corrections hold where they were aimed: no sentinel was stored, rejections rose as the gate began to discriminate, and confirmations reinforced anchors instead of copying them into core. Two failure modes appeared that the calibration data did not show:
+
+- **The deployed quorum has no payoff test.** Procedural turns — approvals, *go ahead*, *send it again* — recur across days by their nature, so they meet a day-based quorum and were consolidated with importance as low as 0.18. The simulation's consolidation rejects a candidate whose outcomes are mostly negative; the deployed cluster records a payoff estimate (the mean importance of its members) but the promotion rule never reads it. This is the payoff bias of §2.1 acting where v3 says it should act — at consolidation — and its absence in the deployment is the gap. **[pending: payoff test at consolidation, decision 11 Oct]**
+- **Retrieval consolidation must be content-addressed.** One long request had been sent three times and stored as three memories with the same body; they shared one retrieval-log key, and all three were promoted. Fixed on 11 October: one promotion per content, the earliest copy.
+
+### 3.6 Identity across representations
+
+Three defects in this deployment had the same shape: a component referred to a memory by something other than a stable key derived from its content, and the reference drifted.
+
+- **Positions.** The semantic layer keyed processed clusters by memory index; decay deletes memories and shifts every later index, so a processed cluster could return under a new key or collide with another.
+- **Shared prefixes.** Episodes were embedded with their timestamp-and-role header. Every episode shares the header, so similarity measured the header as much as the content.
+- **Two normalisations.** The gate stored some memory texts in their original case (written by a migration) and the store looked them up in lower case. 56 of 83 consolidated anchors contained capitals; an exact lookup found 27, a normalised one 79. For two weeks the gate counted 25 anchor reinforcements while the store recorded one, and three existing anchors were treated as deleted and reassigned. Nothing was lost, but an approved mechanism ran at about 4% of its intended effect without any error.
+
+None of the three raised an exception. A memory system needs one canonical content key, used by every component that refers to a memory, and checks that the references resolve.
 
 ---
 
@@ -152,7 +179,9 @@ The quorum asks *did the user say this on two different days?* With one user at 
 
 This is the testing effect as a consolidation rule: retrieval, not re-exposure, is the event that makes a memory durable.
 
-**[pending]** retrieval events per day; distinct-day retrieval counts; promotions by retrieval versus by quorum; overlap between the two. Measure from `cognitive_state/recall_log.json` and `core_reason` in the memory metadata.
+**Held-out results [dep].** 84 retrieval events injected 48 distinct memories into prompts. Distinct-day counts: 35 memories retrieved on one day, 10 on two, 2 on three, 1 on four — **13 of 48 (27%) met a two-day retrieval quorum**, over a window with only four active days. Retrieval promoted 3 of the 12 new core memories; in the nightly log for 9–11 October it promoted 6 memories in total, including older ones. For comparison, in the eleven days before the upgrade 14 of 136 gate clusters (10%) met the two-day *repetition* quorum, two of them on templates. The units differ — memories against clusters — so the comparison is indicative, not a measured effect size.
+
+The three memories promoted by retrieval in the window were copies of one request (see §3.5); after the content-addressing fix that counts as one promotion. **[pending]** overlap between retrieval and quorum promotions; whether promoted memories were retrieved for relevance or because they were already prominent (§6).
 
 ---
 
@@ -173,7 +202,7 @@ The corrected layer runs nightly and requires a cluster's episodes to span at le
 
 First run: 5 candidate clusters, 4 multi-day; 3 processed in about 25 seconds; 5 new beliefs, 1 merged into an existing one; 6 in total. One reaches the confidence and evidence thresholds for use in the prompt ("*asks the assistant for summaries and write-ups on complex projects*", confidence 0.646, 3 episodes).
 
-**[pending]** belief growth over nights; the fraction that reaches the prompt threshold; manual audit of belief accuracy.
+**Held-out results [dep].** Beliefs grew from 6 to 12 over two weeks. Most nights processed no new cluster — the multi-day requirement holds back material until it recurs — and each night one single-day cluster was correctly skipped. Four of the 12 beliefs reach the prompt threshold (confidence ≥ 0.6 and ≥ 3 episodes), the strongest at four episodes. Existing beliefs are reinforced as evidence arrives: the belief about requests for summaries rose from confidence 0.646 to 0.826. **[pending]** accuracy audit — only the user the beliefs are about can judge them.
 
 ---
 
@@ -182,6 +211,7 @@ First run: 5 candidate clusters, 4 multi-day; 3 processed in about 25 seconds; 5
 - **One user, one deployment, small N.** 182 memories. Every deployment threshold in §3–§5 was set on this corpus. Traffic after 27 September is the natural held-out set, and every [pending] item is to be measured on it, not on the calibration data.
 - **Sources are roles, not identities.** Prestige bias has a population of two; the simulation's sybil and farming results have no deployment counterpart yet. A multi-agent deployment (the assistant already delegates to sub-agents) would provide one.
 - **Outcome channels are sparse and asymmetric.** All three speak about the assistant; nothing in the deployment speaks about the user's reliability, which is appropriate but leaves the user's ledger entry at its prior.
+- **Bursty traffic.** The held-out window had 111 memories but four active days. Every day-based rule — the repetition quorum, the retrieval quorum, the semantic quorum — saw at most four days, so its behaviour on steadier traffic is untested.
 - **The retrieval rule has a feedback risk.** A memory retrieved because it is core is more likely to be retrieved again. Promotion only flows from buffer to core, so the loop cannot demote, but it can entrench. **[pending: check whether promoted memories were retrieved for relevance or for status]**
 
 ---
@@ -190,10 +220,11 @@ First run: 5 candidate clusters, 4 multi-day; 3 processed in about 25 seconds; 5
 
 | Item | How |
 |:--|:--|
-| Corrected gate on live traffic | `python3 haci_cognitive/gate_report.py` (boundary: 27 Sep upgrade) |
+| Corrected gate on live traffic | **done, 11 Oct** (§3.5); continue with `python3 haci_cognitive/gate_report.py` |
 | Old gate period for comparison | `python3 haci_cognitive/gate_report.py --since cognitive_state/gate_baseline_20260916.json` |
-| Retrieval consolidation | `cognitive_state/recall_log.json`; `core_reason == "recall"` in `retention_state.json` |
-| Belief growth | `cognitive_state/beliefs.json`; nightly log `memory/nightly_maintenance.log`, section *uyku konsolidasyonu* |
+| Retrieval consolidation | **first results, 11 Oct** (§4); overlap and feedback check pending |
+| Belief growth | **first results, 11 Oct** (§5); accuracy audit needs the user |
+| Payoff test at consolidation | decision pending (§3.5) |
 | Simulation with the corrected gate position and k = 1 | `python3 sls_retention_sim.py --seeds 20` on this branch |
 
-Suggested minimum before submission: 30 or more post-upgrade memories over at least four distinct days, so that the day-based rules in §3.5, §4 and §5 have had a chance to fire.
+The suggested minimum — 30 or more post-upgrade memories over at least four distinct days — was met on 11 October (111 memories, exactly four days). Because the day count is at the minimum, the day-based rules should be re-measured once traffic has spread over more days.
