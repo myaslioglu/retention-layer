@@ -2,7 +2,7 @@
 
 **Working subtitle:** Social learning strategies for persistent memory, in simulation and in a deployed assistant
 
-*Draft started 2026-09-27; held-out deployment results added 2026-10-11. Status of every number is marked: **[sim]** simulation in this repository, **[dep]** measured on the deployed assistant, **[pending]** not yet measured. Nothing marked [pending] may be cited.*
+*Draft started 2026-09-27; held-out deployment results added 2026-10-11; curated-tier decay and the k = 1 simulation run added 2026-10-14. Status of every number is marked: **[sim]** simulation in this repository, **[dep]** measured on the deployed assistant, **[pending]** not yet measured. Nothing marked [pending] may be cited.*
 
 ---
 
@@ -17,6 +17,7 @@ The two bodies of evidence disagree in instructive ways, and the disagreement is
 3. **Similarity is a calibration-coupled quantity.** Every threshold that compares two memories — surprise reference, cluster link, belief-cluster threshold, duplicate threshold — is defined on the scale of one similarity measure, and changing the measure silently invalidates all of them together. The simulation cannot show this, because its similarity is cosine between synthetic unit vectors.
 4. **Retrieval is denser consolidation evidence than repetition.** A conformist quorum over distinct days starves when one user produces about one memory a day. Counting the days on which a memory was *needed* — retrieved into the prompt — gives the quorum a denser signal. This is the deployment analogue of the testing effect. On held-out traffic, 13 of 48 retrieved memories were retrieved on two or more distinct days, and retrieval accounted for 3 of 12 new core memories (§4).
 5. **Identity must be content-addressed, everywhere.** Three separate defects in the deployment came from referring to a memory by something other than a stable content key: list positions (shifted by decay), embeddings computed over a shared header, and one text normalisation in the gate against another in the store (§3.6).
+6. **Forgetting is an eviction policy, and silent truncation is the worst one available.** The host cut the assistant's curated memory by position, which removed its oldest and most durable sections. Decay as relocation to a searchable archive, reversed by retrieval, keeps the prompt within budget without erasing anything (§6).
 
 v3 also corrects two v2 claims that the code did not support (§2.1, §2.2).
 
@@ -30,7 +31,7 @@ A retention lifecycle derived from social learning strategies is a family of ope
 
 ## 2. Simulation: what the v2 experiment did and did not show [sim]
 
-All results use `sls_retention_sim.py` with 20 seeds. Every policy sees the same event stream under a seed, so differences are reported as **paired** 95% intervals (v2 reported unpaired intervals; pairing makes several ablations significant and shows three of them to be exact no-ops, ±0.0000).
+All results use `sls_retention_sim.py` with 20 seeds; the k = 1 run is `results/results_v3.json`. Every policy sees the same event stream under a seed, so differences are reported as **paired** 95% intervals (v2 reported unpaired intervals; pairing makes several ablations significant and shows three of them to be exact no-ops, ±0.0000).
 
 ### 2.1 Correction: payoff and prestige do not gate encoding
 
@@ -75,7 +76,7 @@ Mapping of the lifecycle:
 | Quorum | Distinct **days** on which a topic recurs (one user, so days stand in for sources) |
 | Relative condition | A cluster must out-support similar rival clusters |
 | Reconsolidation | Retrieval into the prompt (§4), outcome channels |
-| Decay | Importance bands; core protected |
+| Decay | Importance bands; core protected. Curated tier: relocation to a searchable archive (§6) |
 
 Corpus at first measurement: 109 memories over 116 days, **0.94 memories per day**.
 
@@ -181,7 +182,7 @@ This is the testing effect as a consolidation rule: retrieval, not re-exposure, 
 
 **Held-out results [dep].** 84 retrieval events injected 48 distinct memories into prompts. Distinct-day counts: 35 memories retrieved on one day, 10 on two, 2 on three, 1 on four — **13 of 48 (27%) met a two-day retrieval quorum**, over a window with only four active days. Retrieval promoted 3 of the 12 new core memories; in the nightly log for 9–11 October it promoted 6 memories in total, including older ones. For comparison, in the eleven days before the upgrade 14 of 136 gate clusters (10%) met the two-day *repetition* quorum, two of them on templates. The units differ — memories against clusters — so the comparison is indicative, not a measured effect size.
 
-The three memories promoted by retrieval in the window were copies of one request (see §3.5); after the content-addressing fix that counts as one promotion. **[pending]** overlap between retrieval and quorum promotions; whether promoted memories were retrieved for relevance or because they were already prominent (§6).
+The three memories promoted by retrieval in the window were copies of one request (see §3.5); after the content-addressing fix that counts as one promotion. **[pending]** overlap between retrieval and quorum promotions; whether promoted memories were retrieved for relevance or because they were already prominent (§7).
 
 ---
 
@@ -206,17 +207,37 @@ First run: 5 candidate clusters, 4 multi-day; 3 processed in about 25 seconds; 5
 
 ---
 
-## 6. Limitations
+## 6. Curated memory under a prompt budget: forgetting as eviction, not erasure [dep]
 
-- **One user, one deployment, small N.** 182 memories. Every deployment threshold in §3–§5 was set on this corpus. Traffic after 27 September is the natural held-out set, and every [pending] item is to be measured on it, not on the calibration data.
+Besides the episodic store, the assistant keeps a curated memory file that the host injects into every private-session prompt. It holds durable facts, standing decisions and short dated notes, and the assistant writes it itself. The host truncates each injected file at 20,000 characters and gives no notice beyond a log line.
+
+**Truncation evicted by position.** The assistant prepends new notes, so the file grew upward over its structural sections. At 32,941 characters, 28 of its 58 sections began past the cut. One of them was the section holding the user's standing decisions and preferences, at offset 29,571. Truncation is an eviction policy. Here it removed whatever sat lowest in the file, which was the oldest and most durable material, and nothing in the system reported it. This is the regime of §2.3: once the store is bounded, the eviction rule becomes the largest single effect, and the deployment's default rule was the worst one available.
+
+The two files are the paper's two levels in miniature. The injected file is what attention sees on every turn; the archive is what retrieval can bring back.
+
+**Decay as relocation.** The corrected tier applies the lifecycle's decay operator with the episodic store's bands. Forgetting moves an entry instead of deleting it:
+
+- Each entry is a dated note or a section, keyed by its normalised title rather than its position (§3.6). Its strength is exp(−ln 2 · a / S). Here *a* is the number of days since the later of the entry's date and its last retrieval, and S = h · (1 + 0.5 · r). *h* is the half-life of the entry's importance band: 14, 30, 60 or 90 days, the same bands as the episodic decay. *r* is the number of distinct days in the last 30 on which the entry was retrieved.
+- An entry whose strength falls below 0.35 moves to an archive file that stays searchable but is not injected. A budget pass keeps the injected file under 16,000 characters. Pinned sections, the user profile and the standing decisions, never move.
+- Retrieval acts in both directions. A retrieval that returns an injected entry resets its age. An archived entry retrieved on three distinct days within 30 days returns to the injected file. This is the testing effect of §4 applied to eviction.
+- Nothing is deleted. Every run checks that the multiset of content lines across both files is unchanged, and aborts if it is not.
+
+**First results [dep].** A one-off manual split on 12 October moved 30 dated sections to the archive, taking the file from 32,941 to 18,557 characters. The first automatic run the same day moved 6 of the 33 remaining entries. Their strengths ranged from 0.003 to 0.320: two notes superseded by later ones, a retired model, and three projects last dated between May and July. The file was left at 15,671 characters. The line check passed, and a second run changed nothing. On the following night one of the moved entries fell below 0.10 and was relabelled archived; no text changed. **[pending]** Whether retrieval ever returns an archived entry is not yet known. The retrieval recorder went live on 12 October, and no user traffic has arrived since.
+
+---
+
+## 7. Limitations
+
+- **One user, one deployment, small N.** 182 memories. Every deployment threshold in §3–§6 was set on this corpus. Traffic after 27 September is the natural held-out set, and every [pending] item is to be measured on it, not on the calibration data.
 - **Sources are roles, not identities.** Prestige bias has a population of two; the simulation's sybil and farming results have no deployment counterpart yet. A multi-agent deployment (the assistant already delegates to sub-agents) would provide one.
 - **Outcome channels are sparse and asymmetric.** All three speak about the assistant; nothing in the deployment speaks about the user's reliability, which is appropriate but leaves the user's ledger entry at its prior.
 - **Bursty traffic.** The held-out window had 111 memories but four active days. Every day-based rule — the repetition quorum, the retrieval quorum, the semantic quorum — saw at most four days, so its behaviour on steadier traffic is untested.
 - **The retrieval rule has a feedback risk.** A memory retrieved because it is core is more likely to be retrieved again. Promotion only flows from buffer to core, so the loop cannot demote, but it can entrench. **[pending: check whether promoted memories were retrieved for relevance or for status]**
+- **The curated-tier decay has no held-out traffic yet.** Its bands come from the episodic store and its 0.35 threshold was chosen, not fitted. The first run moved only entries that were dated months back or superseded, but neither the threshold nor the three-day return rule has been tested on traffic.
 
 ---
 
-## 7. Pending measurements
+## 8. Pending measurements
 
 | Item | How |
 |:--|:--|
@@ -225,6 +246,7 @@ First run: 5 candidate clusters, 4 multi-day; 3 processed in about 25 seconds; 5
 | Retrieval consolidation | **first results, 11 Oct** (§4); overlap and feedback check pending |
 | Belief growth | **first results, 11 Oct** (§5); accuracy audit needs the user |
 | Payoff test at consolidation | added 11 Oct (§3.5); effect on later traffic pending |
-| Simulation with the corrected gate position and k = 1 | `python3 sls_retention_sim.py --seeds 20` on this branch |
+| Curated-tier decay | **first run, 12 Oct** (§6); return by retrieval pending. Plan: `python3 haci_cognitive/memory_md_decay.py --dry-run`; retrieval log `cognitive_state/memory_md_recall.json` |
+| Simulation with the corrected gate position and k = 1 | **done, 14 Oct**: `results/results_v3.json`. It reproduces the review-branch k = 1 run exactly (40,584 summary values and 2,832 paired differences), so the k = 1 figures in §2.3 stand. |
 
 The suggested minimum — 30 or more post-upgrade memories over at least four distinct days — was met on 11 October (111 memories, exactly four days). Because the day count is at the minimum, the day-based rules should be re-measured once traffic has spread over more days.
